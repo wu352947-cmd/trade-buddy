@@ -195,23 +195,35 @@ export function WatchlistAndDetails({
                         </div>
 
                         <div className="tabular-nums text-right text-[12px] font-medium tb-text-primary">
-                          {item.quote.last.toFixed(prec)}
+                          {item.quote.last > 0
+                            ? item.quote.last.toFixed(prec)
+                            : "—"}
                         </div>
                         <div
                           className={`tabular-nums text-right text-[11px] ${
-                            rowUp ? "tb-up" : "tb-down"
+                            item.quote.last > 0
+                              ? rowUp
+                                ? "tb-up"
+                                : "tb-down"
+                              : "tb-text-muted"
                           }`}
                         >
-                          {rowUp ? "+" : ""}
-                          {item.quote.change.toFixed(prec)}
+                          {item.quote.last > 0
+                            ? `${rowUp ? "+" : ""}${item.quote.change.toFixed(prec)}`
+                            : "在线"}
                         </div>
                         <div
                           className={`tabular-nums text-right text-[11px] font-medium ${
-                            rowUp ? "tb-up" : "tb-down"
+                            item.quote.last > 0
+                              ? rowUp
+                                ? "tb-up"
+                                : "tb-down"
+                              : "tb-text-muted"
                           }`}
                         >
-                          {rowUp ? "+" : ""}
-                          {item.quote.changePercent.toFixed(2)}%
+                          {item.quote.last > 0
+                            ? `${rowUp ? "+" : ""}${item.quote.changePercent.toFixed(2)}%`
+                            : "点击加载"}
                         </div>
                       </button>
                     );
@@ -277,8 +289,9 @@ export function WatchlistAndDetails({
             </span>
           </div>
           <div className="tb-text-muted mt-0.5">{activeProvenance.provider}</div>
+          <div className="tb-text-muted mt-0.5">{activeProvenance.delayNote}</div>
           {activeProvenance.dateRange && (
-            <div className="tb-text-muted tabular-nums">
+            <div className="tb-text-muted tabular-nums mt-0.5">
               区间：{activeProvenance.dateRange}
             </div>
           )}

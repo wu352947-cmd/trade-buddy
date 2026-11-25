@@ -264,3 +264,18 @@ export const IconShield = ({ size = 15, className }: IconProps) => (
     <polyline points="7.5,10.2 9.3,12 12.8,8.2" />
   </svg>
 );
+
+export const IconRefresh = ({ size = 15, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M16 10A6 6 0 1 1 14.2 5.7" />
+    <polyline points="14.5,2.8 14.5,6.2 11.1,6.2" />
+  </svg>
+);
+
+export const IconExternalLink = ({ size = 13, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M11 4H16V9" />
+    <line x1="9" y1="11" x2="16" y2="4" />
+    <path d="M14 11.5V15C14 15.6 13.6 16 13 16H5C4.4 16 4 15.6 4 15V7C4 6.4 4.4 6 5 6H8.5" />
+  </svg>
+);

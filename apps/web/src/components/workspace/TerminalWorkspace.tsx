@@ -25,6 +25,8 @@ import {
 } from "@/components/chart/KLineChartStage";
 import { WatchlistAndDetails } from "@/components/panels/WatchlistAndDetails";
 import { DataWindowAndTree } from "@/components/panels/DataWindowAndTree";
+import { NewsFlowPanel } from "@/components/panels/NewsFlowPanel";
+import { EconomicCalendarPanel } from "@/components/panels/EconomicCalendarPanel";
 import { SymbolSearchModal } from "@/components/dialogs/SymbolSearchModal";
 import { IndicatorModal } from "@/components/dialogs/IndicatorModal";
 
@@ -162,18 +164,26 @@ export function TerminalWorkspace({
   const handleSelectDrawingTool = useCallback(
     (tool: DrawingToolId) => {
       if (tool === "cursor") {
+        chartRef.current?.cancelPendingDrawing();
         setActiveTool("cursor");
-        return;
-      }
-      if (tool === "measure") {
-        showToast("测距尺工具将在后续批次完善，目前可使用趋势线/斐波那契/矩形等 7 种画线工具");
         return;
       }
       setActiveTool(tool);
       chartRef.current?.startDrawing(tool, magnetEnabled, annotationText);
     },
-    [magnetEnabled, annotationText, showToast]
+    [magnetEnabled, annotationText]
   );
+
+  const handleCancelDrawingTool = useCallback(() => {
+    chartRef.current?.cancelPendingDrawing();
+    setActiveTool("cursor");
+  }, []);
+
+  const handleUpdateDrawingLabel = useCallback((id: string, label: string) => {
+    setDrawings((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, label } : d))
+    );
+  }, []);
 
   const handleRemoveDrawing = useCallback((id: string) => {
     chartRef.current?.removeOverlayById(id);
@@ -203,6 +213,7 @@ export function TerminalWorkspace({
       if (e.key === "Escape") {
         setSearchOpen(false);
         setIndicatorOpen(false);
+        chartRef.current?.cancelPendingDrawing();
         setActiveTool("cursor");
         return;
       }
@@ -229,6 +240,9 @@ export function TerminalWorkspace({
         } else if (k === "f") {
           e.preventDefault();
           handleSelectDrawingTool("fibonacci");
+        } else if (k === "m") {
+          e.preventDefault();
+          handleSelectDrawingTool("measure");
         }
         return;
       }
@@ -302,7 +316,7 @@ export function TerminalWorkspace({
             activeTool={activeTool}
             annotationText={annotationText}
             onChangeAnnotationText={setAnnotationText}
-            onCancelDrawingTool={() => setActiveTool("cursor")}
+            onCancelDrawingTool={handleCancelDrawingTool}
             onCrosshairChange={(bar, prevClose) => {
               setHoveredBar(bar);
               setHoveredPrevClose(prevClose);
@@ -310,6 +324,7 @@ export function TerminalWorkspace({
             onOverlayCreated={(rec) =>
               setDrawings((prev) => [...prev, rec])
             }
+            onOverlayUpdated={handleUpdateDrawingLabel}
             onRemoveIndicator={handleToggleIndicator}
           />
 
@@ -351,33 +366,10 @@ export function TerminalWorkspace({
               />
             )}
 
-            {(rightTab === "news" || rightTab === "calendar") && (
-              <div className="flex h-full flex-col">
-                <div className="tb-border flex h-[36px] items-center justify-between border-b px-3">
-                  <span className="text-[12px] font-semibold tb-text-primary">
-                    {rightTab === "news" ? "财经资讯流" : "宏观与财报日历"}
-                  </span>
-                  <span
-                    className="rounded px-1.5 py-0.5 text-[10px]"
-                    style={{
-                      backgroundColor: "rgba(245, 158, 11, 0.16)",
-                      color: "var(--status-delayed)",
-                    }}
-                  >
-                    占位 · 后续批次
-                  </span>
-                </div>
-                <div className="flex flex-1 flex-col items-center justify-center p-5 text-center text-[12px] tb-text-secondary">
-                  <div className="font-semibold tb-text-primary mb-1.5">
-                    {rightTab === "news"
-                      ? "财经新闻流模块（规划第 1 期后续批次）"
-                      : "宏观经济与财报日历（规划第 1 期后续批次）"}
-                  </div>
-                  <p className="text-[11px] tb-text-muted leading-relaxed">
-                    本批为本地首版看盘终端，暂以占位面板呈现。后续将按规划接入合法免费资讯源（Finnhub Free / 官方公开 RSS / FRED 宏观日历），仅展示标题、来源与外链原文。
-                  </p>
-                </div>
-              </div>
+            {rightTab === "news" && <NewsFlowPanel symbol={chartData.symbol} />}
+
+            {rightTab === "calendar" && (
+              <EconomicCalendarPanel symbol={chartData.symbol} />
             )}
           </aside>
         )}

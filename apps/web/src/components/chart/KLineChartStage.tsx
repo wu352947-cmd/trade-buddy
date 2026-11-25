@@ -35,6 +35,7 @@ export interface KLineChartHandle {
     magnet: boolean,
     annotationText?: string
   ) => void;
+  cancelPendingDrawing: () => void;
   removeOverlayById: (id: string) => void;
   clearAllOverlays: () => void;
   fitRange: (barCount: number | "all") => void;
@@ -56,7 +57,134 @@ interface KLineChartStageProps {
   onCancelDrawingTool: () => void;
   onCrosshairChange: (bar: NormalizedBar | null, prevClose: number | null) => void;
   onOverlayCreated: (record: DrawnOverlayRecord) => void;
+  onOverlayUpdated?: (id: string, label: string) => void;
   onRemoveIndicator: (id: IndicatorId) => void;
+}
+
+interface MeasurePaletteState {
+  upColor: string;
+  downColor: string;
+  upFill: string;
+  downFill: string;
+  cardBg: string;
+  cardText: string;
+}
+
+const liveMeasurePalette: MeasurePaletteState = {
+  upColor: "#16B981",
+  downColor: "#F2485B",
+  upFill: "rgba(22, 185, 129, 0.14)",
+  downFill: "rgba(242, 72, 91, 0.14)",
+  cardBg: "rgba(19, 23, 34, 0.94)",
+  cardText: "#E6EDF7",
+};
+
+function syncLiveMeasurePalette(theme: ThemeMode, colorScheme: ColorScheme) {
+  const p = getChartPalette(theme, colorScheme);
+  const isDark = theme === "dark";
+  const isIntl = colorScheme === "intl";
+  const greenFill = isDark
+    ? "rgba(22, 185, 129, 0.15)"
+    : "rgba(13, 150, 104, 0.14)";
+  const redFill = isDark
+    ? "rgba(242, 72, 91, 0.15)"
+    : "rgba(224, 49, 70, 0.14)";
+  liveMeasurePalette.upColor = p.upColor;
+  liveMeasurePalette.downColor = p.downColor;
+  liveMeasurePalette.upFill = isIntl ? greenFill : redFill;
+  liveMeasurePalette.downFill = isIntl ? redFill : greenFill;
+  liveMeasurePalette.cardBg = isDark
+    ? "rgba(19, 23, 34, 0.94)"
+    : "rgba(255, 255, 255, 0.96)";
+  liveMeasurePalette.cardText = isDark ? "#E6EDF7" : "#111827";
+}
+
+function formatMeasureDuration(diffMs: number, barCount: number, interval: Interval): string {
+  if (diffMs <= 0) {
+    if (barCount === 0) return "同根 K 线";
+    return interval === "60m"
+      ? `${barCount} 小时`
+      : interval === "1W"
+      ? `${barCount} 周`
+      : interval === "1M"
+      ? `${barCount} 个月`
+      : `${barCount} 交易日`;
+  }
+  const minutes = Math.round(diffMs / 60_000);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = diffMs / 3_600_000;
+  if (hours < 24) return `${hours.toFixed(1).replace(/\.0$/, "")} 小时`;
+  const days = Math.round(diffMs / 86_400_000);
+  if (days < 30) return `${days} 天`;
+  if (days < 365) {
+    const months = Math.floor(days / 30);
+    const remDays = days % 30;
+    return remDays > 0 ? `${months} 个月 ${remDays} 天` : `${months} 个月`;
+  }
+  const years = Math.floor(days / 365);
+  const remMonths = Math.floor((days % 365) / 30);
+  return remMonths > 0 ? `${years} 年 ${remMonths} 个月` : `${years} 年`;
+}
+
+interface MeasureExtendData {
+  pricePrecision: number;
+  interval: Interval;
+}
+
+function computeMeasureStats(
+  points: Array<{ value?: number; timestamp?: number; dataIndex?: number }>,
+  dataList: Array<{ timestamp: number }>,
+  prec: number,
+  interval: Interval
+): {
+  diff: number;
+  pct: number;
+  isUp: boolean;
+  barCount: number;
+  duration: string;
+  badgeText: string;
+  shortLabel: string;
+} {
+  const pt1 = points[0] ?? {};
+  const pt2 = points[1] ?? {};
+  const v1 = pt1.value ?? 0;
+  const v2 = pt2.value ?? 0;
+  const diff = v2 - v1;
+  const pct = v1 !== 0 ? (diff / v1) * 100 : 0;
+  const isUp = diff >= 0;
+
+  let idx1 = pt1.dataIndex;
+  let idx2 = pt2.dataIndex;
+  if (
+    (typeof idx1 !== "number" || typeof idx2 !== "number") &&
+    pt1.timestamp &&
+    pt2.timestamp &&
+    dataList.length > 0
+  ) {
+    idx1 = dataList.findIndex((d) => d.timestamp === pt1.timestamp);
+    idx2 = dataList.findIndex((d) => d.timestamp === pt2.timestamp);
+  }
+  const barCount =
+    typeof idx1 === "number" && typeof idx2 === "number" && idx1 >= 0 && idx2 >= 0
+      ? Math.abs(idx2 - idx1)
+      : 0;
+
+  const ts1 =
+    pt1.timestamp ??
+    (typeof idx1 === "number" ? dataList[idx1]?.timestamp : undefined);
+  const ts2 =
+    pt2.timestamp ??
+    (typeof idx2 === "number" ? dataList[idx2]?.timestamp : undefined);
+  const diffMs =
+    typeof ts1 === "number" && typeof ts2 === "number"
+      ? Math.abs(ts2 - ts1)
+      : 0;
+
+  const duration = formatMeasureDuration(diffMs, barCount, interval);
+  const sign = isUp ? "+" : "";
+  const badgeText = `${sign}${diff.toFixed(prec)} (${sign}${pct.toFixed(2)}%) · ${barCount}根 · ${duration}`;
+  const shortLabel = `测距尺 (${sign}${pct.toFixed(2)}% · ${barCount}根)`;
+  return { diff, pct, isUp, barCount, duration, badgeText, shortLabel };
 }
 
 const TOOL_TO_OVERLAY: Partial<
@@ -96,6 +224,11 @@ const TOOL_TO_OVERLAY: Partial<
     name: "simpleAnnotation",
     label: "文字标注",
     hint: "输入注释文本后点击主图任意位置放置",
+  },
+  measure: {
+    name: "tbMeasure",
+    label: "涨跌幅测距尺",
+    hint: "请依次点击起点与终点测量价差、涨跌幅及 K 线跨度（Esc 退出）",
   },
 };
 
@@ -372,6 +505,7 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       onCancelDrawingTool,
       onCrosshairChange,
       onOverlayCreated,
+      onOverlayUpdated,
       onRemoveIndicator,
     },
     ref
@@ -379,6 +513,7 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<Chart | null>(null);
     const barsRef = useRef<NormalizedBar[]>(bars);
+    const pendingOverlayIdRef = useRef<string | null>(null);
     const indicatorIdsRef = useRef<
       Partial<Record<IndicatorId, { id: string; paneId: string }>>
     >({});
@@ -392,8 +527,14 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
     onCrosshairRef.current = onCrosshairChange;
     const onOverlayCreatedRef = useRef(onOverlayCreated);
     onOverlayCreatedRef.current = onOverlayCreated;
+    const onOverlayUpdatedRef = useRef(onOverlayUpdated);
+    onOverlayUpdatedRef.current = onOverlayUpdated;
     const onCancelToolRef = useRef(onCancelDrawingTool);
     onCancelToolRef.current = onCancelDrawingTool;
+    const symbolPrecRef = useRef(symbol.pricePrecision);
+    symbolPrecRef.current = symbol.pricePrecision;
+    const intervalRef = useRef(interval);
+    intervalRef.current = interval;
 
     barsRef.current = bars;
 
@@ -460,6 +601,129 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
           });
         }
 
+        // Register custom Trade Buddy Measure Ruler overlay once
+        if (!kc.getSupportedOverlays().includes("tbMeasure")) {
+          kc.registerOverlay<MeasureExtendData>({
+            name: "tbMeasure",
+            totalStep: 3,
+            needDefaultPointFigure: true,
+            needDefaultXAxisFigure: true,
+            needDefaultYAxisFigure: true,
+            createPointFigures: ({ overlay, coordinates, bounding, chart }) => {
+              if (coordinates.length !== 2 || overlay.points.length < 2) {
+                return [];
+              }
+              const [p1, p2] = coordinates;
+              const ext = overlay.extendData ?? {
+                pricePrecision: 2,
+                interval: "1D" as Interval,
+              };
+              const stats = computeMeasureStats(
+                overlay.points,
+                chart.getDataList(),
+                ext.pricePrecision,
+                ext.interval
+              );
+              const strokeColor = stats.isUp
+                ? liveMeasurePalette.upColor
+                : liveMeasurePalette.downColor;
+              const fillColor = stats.isUp
+                ? liveMeasurePalette.upFill
+                : liveMeasurePalette.downFill;
+
+              const midX = (p1.x + p2.x) / 2;
+              const midY = (p1.y + p2.y) / 2;
+              const topY = Math.min(p1.y, p2.y);
+              const bottomY = Math.max(p1.y, p2.y);
+
+              const placeBelow = bottomY + 34 < bounding.height;
+              const labelY = placeBelow ? bottomY + 8 : Math.max(10, topY - 28);
+              const clampedX = Math.max(
+                bounding.left + 125,
+                Math.min(bounding.left + bounding.width - 125, midX)
+              );
+
+              return [
+                {
+                  type: "polygon",
+                  attrs: {
+                    coordinates: [
+                      { x: p1.x, y: p1.y },
+                      { x: p2.x, y: p1.y },
+                      { x: p2.x, y: p2.y },
+                      { x: p1.x, y: p2.y },
+                    ],
+                  },
+                  styles: {
+                    style: "stroke_fill",
+                    color: fillColor,
+                    borderColor: strokeColor,
+                    borderSize: 1.5,
+                  },
+                },
+                {
+                  type: "line",
+                  attrs: {
+                    coordinates: [
+                      { x: p1.x, y: midY },
+                      { x: p2.x, y: midY },
+                    ],
+                  },
+                  styles: {
+                    style: "dashed",
+                    color: strokeColor,
+                    size: 1,
+                    dashedValue: [4, 3],
+                  },
+                  ignoreEvent: true,
+                },
+                {
+                  type: "line",
+                  attrs: {
+                    coordinates: [
+                      { x: midX, y: p1.y },
+                      { x: midX, y: p2.y },
+                    ],
+                  },
+                  styles: {
+                    style: "dashed",
+                    color: strokeColor,
+                    size: 1,
+                    dashedValue: [4, 3],
+                  },
+                  ignoreEvent: true,
+                },
+                {
+                  type: "text",
+                  attrs: {
+                    x: clampedX,
+                    y: labelY,
+                    text: stats.badgeText,
+                    align: "center",
+                    baseline: "top",
+                  },
+                  styles: {
+                    style: "stroke_fill",
+                    color: liveMeasurePalette.cardText,
+                    size: 11,
+                    weight: "bold",
+                    backgroundColor: liveMeasurePalette.cardBg,
+                    borderColor: strokeColor,
+                    borderSize: 1,
+                    borderRadius: 4,
+                    paddingLeft: 8,
+                    paddingRight: 8,
+                    paddingTop: 4,
+                    paddingBottom: 4,
+                  },
+                  ignoreEvent: true,
+                },
+              ];
+            },
+          });
+        }
+
+        syncLiveMeasurePalette(theme, colorScheme);
         const chart = kc.init(containerRef.current, {
           locale: "zh-CN",
           timezone: "Asia/Shanghai",
@@ -553,6 +817,7 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
 
     // Sync Theme / ColorScheme / ChartType styles dynamically
     useEffect(() => {
+      syncLiveMeasurePalette(theme, colorScheme);
       const chart = chartRef.current;
       if (!ready || !chart) return;
       chart.setStyles(buildChartStyles(theme, colorScheme, chartType));
@@ -649,36 +914,88 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
           const spec = TOOL_TO_OVERLAY[tool];
           if (!spec) return;
 
-          const overlayId = chart.createOverlay({
+          // Cancel any unfinished drawing before starting a new one
+          if (pendingOverlayIdRef.current) {
+            chart.removeOverlay({ id: pendingOverlayIdRef.current });
+            pendingOverlayIdRef.current = null;
+          }
+
+          const extendData =
+            tool === "text"
+              ? textVal?.trim() || "关键观察位"
+              : tool === "measure"
+              ? ({
+                  pricePrecision: symbolPrecRef.current,
+                  interval: intervalRef.current,
+                } satisfies MeasureExtendData)
+              : undefined;
+
+          const created = chart.createOverlay({
             name: spec.name,
             paneId: "candle_pane",
             mode: magnet ? "weak_magnet" : "normal",
-            extendData:
-              tool === "text" ? textVal?.trim() || "关键观察位" : undefined,
+            extendData,
             onDrawEnd: ({ overlay }) => {
+              if (pendingOverlayIdRef.current === overlay.id) {
+                pendingOverlayIdRef.current = null;
+              }
+              let label = spec.label;
+              if (tool === "text") {
+                label = `文字：${textVal?.trim() || "关键观察位"}`;
+              } else if (tool === "measure") {
+                const stats = computeMeasureStats(
+                  overlay.points,
+                  chart.getDataList(),
+                  symbolPrecRef.current,
+                  intervalRef.current
+                );
+                label = stats.shortLabel;
+              }
               onOverlayCreatedRef.current({
                 id: overlay.id,
                 tool,
-                label:
-                  tool === "text"
-                    ? `文字：${textVal?.trim() || "关键观察位"}`
-                    : spec.label,
+                label,
                 klineOverlayName: spec.name,
                 createdAt: Date.now(),
               });
               onCancelToolRef.current();
             },
+            onPressedMoveEnd:
+              tool === "measure"
+                ? ({ overlay }) => {
+                    const stats = computeMeasureStats(
+                      overlay.points,
+                      chart.getDataList(),
+                      symbolPrecRef.current,
+                      intervalRef.current
+                    );
+                    onOverlayUpdatedRef.current?.(overlay.id, stats.shortLabel);
+                  }
+                : undefined,
           });
 
-          // Single-step overlays (none currently) or failed creation guard
-          if (!overlayId) {
+          const overlayId = Array.isArray(created) ? created[0] : created;
+          if (typeof overlayId === "string" && overlayId) {
+            pendingOverlayIdRef.current = overlayId;
+          } else {
             onCancelToolRef.current();
           }
         },
+        cancelPendingDrawing: () => {
+          const chart = chartRef.current;
+          if (chart && pendingOverlayIdRef.current) {
+            chart.removeOverlay({ id: pendingOverlayIdRef.current });
+            pendingOverlayIdRef.current = null;
+          }
+        },
         removeOverlayById: (id: string) => {
+          if (pendingOverlayIdRef.current === id) {
+            pendingOverlayIdRef.current = null;
+          }
           chartRef.current?.removeOverlay({ id });
         },
         clearAllOverlays: () => {
+          pendingOverlayIdRef.current = null;
           chartRef.current?.removeOverlay();
         },
         fitRange,
@@ -836,6 +1153,21 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
               >
                 取消
               </button>
+            </div>
+          )}
+
+          {/* Empty Data Overlay (e.g. online-only FRED index when offline) */}
+          {!loading && bars.length === 0 && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6">
+              <div className="tb-elevated tb-border-subtle max-w-md rounded-lg border px-4 py-3 text-center shadow-lg">
+                <div className="text-[13px] font-semibold tb-text-primary">
+                  暂未获取到 {symbol.ticker}（{symbol.name}）的历史 K 线
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed tb-text-secondary">
+                  {provenance.fallbackReason ||
+                    "当前处于离线环境或上游公开源暂不可达，请检查网络连接后重新点击该品种，或切换其他已捆绑历史样本的品种。"}
+                </p>
+              </div>
             </div>
           )}
 

@@ -285,7 +285,38 @@ export const SYMBOL_CATALOG: SymbolMeta[] = [
       isSample: false,
     },
   },
+  {
+    id: "IDX:NASDAQCOM",
+    ticker: "NASDAQCOM",
+    name: "纳斯达克综合指数",
+    nameEn: "NASDAQ Composite Index (FRED Official)",
+    market: "FUTURES_INDEX",
+    exchange: "FRED / US",
+    currency: "USD",
+    pricePrecision: 2,
+    assetType: "INDEX",
+    supportedIntervals: ["1D", "1W", "1M"],
+    sector: "全球核心股指",
+    description: "纳斯达克全市场综合指数（美联储 FRED 官方公开免 Key 日线序列，联网自动拉取）",
+    defaultProvenance: {
+      kind: "official_fred",
+      badge: "FRED 官方日线",
+      provider: "FRED 美联储官方公开 CSV（NASDAQCOM）",
+      delayNote: "免 Key 官方滞后 1 交易日收盘指数（仅收盘价，无成交量；离线环境暂不可拉取）",
+      isSample: false,
+    },
+  },
 ];
+
+/**
+ * 内置美股品种对应 SEC EDGAR 10 位 CIK，用于免 Key 官方公告与财报申报直连
+ */
+export const US_SYMBOL_CIK_MAP: Record<string, { cik: string; entityName: string }> = {
+  "US:AAPL": { cik: "0000320193", entityName: "Apple Inc." },
+  "US:MSFT": { cik: "0000789019", entityName: "Microsoft Corp." },
+  "US:TSLA": { cik: "0001318605", entityName: "Tesla, Inc." },
+  "US:AMZN": { cik: "0001018724", entityName: "Amazon.com, Inc." },
+};
 
 export const DEFAULT_SYMBOL_ID = "US:AAPL";
 

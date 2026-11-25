@@ -46,6 +46,7 @@ export const ProvenanceKindSchema = z.enum([
   "delayed",
   "proxy",
   "official_fred",
+  "live_ref",
 ]);
 export type ProvenanceKind = z.infer<typeof ProvenanceKindSchema>;
 
@@ -58,6 +59,11 @@ export const DataProvenanceSchema = z.object({
   isSample: z.boolean(),
   isProxy: z.boolean().optional(),
   proxyOf: z.string().optional(),
+  delayMinutes: z.number().int().nonnegative().optional(),
+  quoteProvider: z.string().optional(),
+  cached: z.boolean().optional(),
+  stale: z.boolean().optional(),
+  fallbackReason: z.string().optional(),
 });
 export type DataProvenance = z.infer<typeof DataProvenanceSchema>;
 
@@ -127,6 +133,82 @@ export const BarsResponseSchema = z.object({
   fetchedAt: z.string(),
 });
 export type BarsResponse = z.infer<typeof BarsResponseSchema>;
+
+export const QuoteResponseSchema = z.object({
+  symbol: SymbolMetaSchema,
+  quote: NormalizedQuoteSchema,
+  provenance: DataProvenanceSchema,
+  fetchedAt: z.string(),
+});
+export type QuoteResponse = z.infer<typeof QuoteResponseSchema>;
+
+export const NewsScopeSchema = z.enum(["symbol", "market"]);
+export type NewsScope = z.infer<typeof NewsScopeSchema>;
+
+export const NewsItemSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  url: z.string(),
+  source: z.string(),
+  sourceBadge: z.string(),
+  publishedAt: z.string(),
+  category: z.string().optional(),
+  relatedSymbols: z.array(z.string()).optional(),
+  summary: z.string().optional(),
+});
+export type NewsItem = z.infer<typeof NewsItemSchema>;
+
+export const NewsResponseSchema = z.object({
+  scope: NewsScopeSchema,
+  symbolId: z.string().optional(),
+  items: z.array(NewsItemSchema),
+  sources: z.array(z.string()),
+  delayNote: z.string(),
+  mode: z.enum(["api_key", "public_official", "stale_cache", "empty"]),
+  fetchedAt: z.string(),
+  warning: z.string().optional(),
+  emptyHint: z.string().optional(),
+});
+export type NewsResponse = z.infer<typeof NewsResponseSchema>;
+
+export const CalendarImportanceSchema = z.enum(["high", "medium", "low"]);
+export type CalendarImportance = z.infer<typeof CalendarImportanceSchema>;
+
+export const CalendarEventKindSchema = z.enum(["macro", "earnings", "filing"]);
+export type CalendarEventKind = z.infer<typeof CalendarEventKindSchema>;
+
+export const CalendarEventSchema = z.object({
+  id: z.string(),
+  date: z.string(),
+  time: z.string(),
+  timezone: z.string().optional(),
+  country: z.string(),
+  title: z.string(),
+  kind: CalendarEventKindSchema,
+  importance: CalendarImportanceSchema.optional(),
+  previous: z.string().optional(),
+  forecast: z.string().optional(),
+  actual: z.string().optional(),
+  unit: z.string().optional(),
+  symbol: z.string().optional(),
+  source: z.string(),
+  url: z.string().optional(),
+});
+export type CalendarEvent = z.infer<typeof CalendarEventSchema>;
+
+export const CalendarResponseSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  symbolId: z.string().optional(),
+  events: z.array(CalendarEventSchema),
+  sources: z.array(z.string()),
+  delayNote: z.string(),
+  mode: z.enum(["api_key", "public_official", "stale_cache", "empty"]),
+  fetchedAt: z.string(),
+  warning: z.string().optional(),
+  emptyHint: z.string().optional(),
+});
+export type CalendarResponse = z.infer<typeof CalendarResponseSchema>;
 
 export type IndicatorId = "MA" | "EMA" | "BOLL" | "VOL" | "RSI" | "MACD";
 

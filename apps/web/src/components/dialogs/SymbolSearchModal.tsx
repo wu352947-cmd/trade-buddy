@@ -202,13 +202,22 @@ export function SymbolSearchModal({
                   <div className="flex items-center gap-3 shrink-0">
                     <div className="text-right tabular-nums">
                       <div className="text-[12px] font-medium tb-text-primary">
-                        {item.quote.last.toFixed(s.pricePrecision)}
+                        {item.quote.last > 0
+                          ? item.quote.last.toFixed(s.pricePrecision)
+                          : "—"}
                       </div>
                       <div
-                        className={`text-[11px] ${isUp ? "tb-up" : "tb-down"}`}
+                        className={`text-[11px] ${
+                          item.quote.last > 0
+                            ? isUp
+                              ? "tb-up"
+                              : "tb-down"
+                            : "tb-text-muted"
+                        }`}
                       >
-                        {isUp ? "+" : ""}
-                        {item.quote.changePercent.toFixed(2)}%
+                        {item.quote.last > 0
+                          ? `${isUp ? "+" : ""}${item.quote.changePercent.toFixed(2)}%`
+                          : "联网加载"}
                       </div>
                     </div>
                     <span

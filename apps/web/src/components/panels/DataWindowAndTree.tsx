@@ -238,12 +238,12 @@ export function DataWindowAndTree({
                     className="tb-hover flex items-center justify-between rounded px-2 py-1.5 text-[12px]"
                   >
                     <span className="tb-text-secondary truncate">
-                      画线 · {d.label}
+                      {d.tool === "measure" ? d.label : `画线 · ${d.label}`}
                     </span>
                     <button
                       type="button"
                       onClick={() => onRemoveDrawing(d.id)}
-                      title="删除此画线"
+                      title="删除此对象"
                       className="tb-text-muted hover:text-[#F2485B] cursor-pointer"
                     >
                       <IconClose size={13} />

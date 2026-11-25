@@ -44,15 +44,13 @@ const RAIL_ITEMS: Array<{
   },
   {
     id: "news",
-    label: "财经资讯流（占位 · 后续批次）",
+    label: "财经资讯流（当前品种 / 全市场）",
     icon: <IconNews size={18} />,
-    placeholder: true,
   },
   {
     id: "calendar",
-    label: "宏观与财报日历（占位 · 后续批次）",
+    label: "宏观经济与财报日历",
     icon: <IconCalendar size={18} />,
-    placeholder: true,
   },
 ];
 

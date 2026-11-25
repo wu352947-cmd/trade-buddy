@@ -139,25 +139,37 @@ export function BottomDock({ symbol, provenance, envStatus }: BottomDockProps) {
                   本地数据源适配状态（无 Key 自动回退历史样本）
                 </div>
                 <div className="grid grid-cols-2 gap-y-1 gap-x-3 tb-text-secondary">
-                  <span>FRED 公开日线（免 Key）</span>
-                  <span className="tb-up">
-                    {envStatus.fredPublicEnabled ? "已启用（SP500 在线）" : "已关闭"}
+                  <span>FRED 官方指数（免 Key）</span>
+                  <span className={envStatus.fredPublicEnabled ? "tb-up" : "tb-text-muted"}>
+                    {envStatus.fredPublicEnabled ? "已启用（SP500 / NASDAQCOM）" : "已关闭"}
+                  </span>
+                  <span>官方公开资讯/日历（免 Key）</span>
+                  <span className={envStatus.publicFeedsEnabled ? "tb-up" : "tb-text-muted"}>
+                    {envStatus.publicFeedsEnabled ? "已启用（SEC / 美联储 / BLS）" : "已关闭"}
                   </span>
                   <span>Twelve Data Free</span>
                   <span>
-                    {envStatus.twelveDataConfigured ? "已配置 Key" : "未配置（使用样本）"}
+                    {envStatus.twelveDataConfigured ? "已配置 Key（美股 60m/日线）" : "未配置（使用样本）"}
                   </span>
                   <span>Polygon.io Free</span>
                   <span>
-                    {envStatus.polygonConfigured ? "已配置 Key" : "未配置（使用样本）"}
+                    {envStatus.polygonConfigured ? "已配置 Key（美股 60m/日线/新闻）" : "未配置（使用样本）"}
+                  </span>
+                  <span>Finnhub Free</span>
+                  <span>
+                    {envStatus.finnhubConfigured ? "已配置 Key（报价/新闻/日历）" : "未配置（使用公开源）"}
                   </span>
                   <span>EODHD Free</span>
                   <span>
-                    {envStatus.eodhdConfigured ? "已配置 Key" : "未配置（使用样本）"}
+                    {envStatus.eodhdConfigured ? "已配置 Key（美/港股 EOD）" : "未配置（使用样本）"}
                   </span>
-                  <span>Tushare Pro</span>
+                  <span>Tushare Pro / Baostock</span>
                   <span>
-                    {envStatus.tushareConfigured ? "已配置 Token" : "未配置（使用样本）"}
+                    {envStatus.tushareConfigured
+                      ? "Tushare 已配置（A股 EOD）"
+                      : envStatus.baostockEnabled
+                      ? "Baostock 本地已启用"
+                      : "未配置（使用样本）"}
                   </span>
                 </div>
               </div>

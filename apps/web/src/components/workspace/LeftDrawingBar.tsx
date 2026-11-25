@@ -80,9 +80,10 @@ const DRAWING_TOOLS: ToolItem[] = [
   },
   {
     id: "measure",
-    label: "涨跌幅测距尺（占位 · 后续批次完善）",
+    label: "涨跌幅测距尺（两点测价差/涨幅/K线数）",
+    shortcut: "Alt+M",
     icon: <IconMeasure size={18} />,
-    implemented: false,
+    implemented: true,
   },
 ];
 
