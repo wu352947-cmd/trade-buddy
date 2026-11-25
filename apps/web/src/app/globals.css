@@ -1,0 +1,94 @@
+@import "tailwindcss";
+@import "@trade-buddy/ui-tokens/tokens.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "PingFang SC",
+    "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Thin subtle scrollbars for dense financial panels */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.tb-panel {
+  background-color: var(--bg-panel);
+}
+
+.tb-canvas {
+  background-color: var(--bg-canvas);
+}
+
+.tb-elevated {
+  background-color: var(--bg-elevated);
+}
+
+.tb-border {
+  border-color: var(--border-hairline);
+}
+
+.tb-border-subtle {
+  border-color: var(--border-subtle);
+}
+
+.tb-hover:hover {
+  background-color: var(--bg-hover);
+}
+
+.tb-active {
+  background-color: var(--bg-active);
+}
+
+.tb-text-primary {
+  color: var(--text-primary);
+}
+
+.tb-text-secondary {
+  color: var(--text-secondary);
+}
+
+.tb-text-muted {
+  color: var(--text-muted);
+}
+
+.tb-up {
+  color: var(--market-up);
+}
+
+.tb-down {
+  color: var(--market-down);
+}
+
+.tb-up-bg {
+  background-color: var(--market-up-soft);
+  color: var(--market-up);
+}
+
+.tb-down-bg {
+  background-color: var(--market-down-soft);
+  color: var(--market-down);
+}

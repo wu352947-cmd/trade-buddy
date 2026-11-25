@@ -1,0 +1,20 @@
+{
+  "name": "trade-buddy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Trade Buddy — 本地可运行的全球行情研究终端（仅研究与学习，严禁真实交易与杠杆）",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace=@trade-buddy/web run dev",
+    "build": "npm --workspace=@trade-buddy/web run build",
+    "start": "npm --workspace=@trade-buddy/web run start",
+    "typecheck": "npm --workspace=@trade-buddy/web run typecheck",
+    "lint": "npm --workspace=@trade-buddy/web run lint"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

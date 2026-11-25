@@ -1,0 +1,111 @@
+/* ===== Trade Buddy Original Design Tokens (v2) ===== */
+
+:root,
+[data-theme="dark"] {
+  /* 1. Surface Hierarchy (深石板冷灰系，低视觉疲劳) */
+  --bg-canvas: #0e1117;
+  --bg-panel: #131722;
+  --bg-elevated: #1b2130;
+  --bg-hover: #232b3e;
+  --bg-active: #2b364f;
+  --bg-input: #0b0e14;
+
+  /* 2. Borders & Chart Grid */
+  --border-hairline: #222938;
+  --border-subtle: #2d364a;
+  --border-focus: #3b82f6;
+  --chart-grid: rgba(148, 163, 184, 0.08);
+  --chart-crosshair: rgba(148, 163, 184, 0.45);
+
+  /* 3. Typography Colors */
+  --text-primary: #e6edf7;
+  --text-secondary: #9aa6bc;
+  --text-muted: #66738a;
+  --text-inverse: #0b0e14;
+
+  /* 4. Brand Accent (Trade Buddy 伴侣钴蓝) */
+  --accent-primary: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-soft: rgba(59, 130, 246, 0.14);
+
+  /* 5. Market Semantic Colors — Default Intl: Green Up / Red Down */
+  --market-up: #16b981;
+  --market-up-soft: rgba(22, 185, 129, 0.16);
+  --market-down: #f2485b;
+  --market-down-soft: rgba(242, 72, 91, 0.16);
+
+  /* 6. Data Provenance Badges */
+  --status-live: #10b981;
+  --status-delayed: #f59e0b;
+  --status-iex: #38bdf8;
+  --status-proxy: #a855f7;
+  --status-eod: #64748b;
+  --status-sample: #38bdf8;
+
+  /* 7. Indicator Palette */
+  --ind-line-1: #38bdf8;
+  --ind-line-2: #fbbf24;
+  --ind-line-3: #c084fc;
+  --ind-line-4: #fb7185;
+}
+
+/* Optional CN Color Scheme: Red Up / Green Down */
+[data-theme="dark"][data-color-scheme="cn"] {
+  --market-up: #f2485b;
+  --market-up-soft: rgba(242, 72, 91, 0.16);
+  --market-down: #16b981;
+  --market-down-soft: rgba(22, 185, 129, 0.16);
+}
+
+/* Light Theme Tokens */
+[data-theme="light"] {
+  --bg-canvas: #ffffff;
+  --bg-panel: #f7f9fc;
+  --bg-elevated: #ffffff;
+  --bg-hover: #edf1f7;
+  --bg-active: #e2e8f2;
+  --bg-input: #f1f4f9;
+
+  --border-hairline: #e2e7f0;
+  --border-subtle: #cfd7e4;
+  --border-focus: #3b82f6;
+  --chart-grid: rgba(15, 23, 42, 0.06);
+  --chart-crosshair: rgba(15, 23, 42, 0.4);
+
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #8a94a6;
+  --text-inverse: #ffffff;
+
+  --accent-primary: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.12);
+
+  --market-up: #0d9668;
+  --market-up-soft: rgba(13, 150, 104, 0.14);
+  --market-down: #e03146;
+  --market-down-soft: rgba(224, 49, 70, 0.14);
+
+  --status-live: #059669;
+  --status-delayed: #d97706;
+  --status-iex: #0284c7;
+  --status-proxy: #9333ea;
+  --status-eod: #475569;
+  --status-sample: #0284c7;
+
+  --ind-line-1: #0284c7;
+  --ind-line-2: #d97706;
+  --ind-line-3: #9333ea;
+  --ind-line-4: #e11d48;
+}
+
+[data-theme="light"][data-color-scheme="cn"] {
+  --market-up: #e03146;
+  --market-up-soft: rgba(224, 49, 70, 0.14);
+  --market-down: #0d9668;
+  --market-down-soft: rgba(13, 150, 104, 0.14);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
