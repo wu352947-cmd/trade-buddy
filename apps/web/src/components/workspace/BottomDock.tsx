@@ -3,21 +3,50 @@
 import React, { useEffect, useState } from "react";
 import type { DataProvenance, SymbolMeta } from "@trade-buddy/shared-types";
 import type { AdapterEnvStatus } from "@trade-buddy/market-adapters";
-import { IconChevronDown, IconNotes, IconShield } from "@trade-buddy/ui-tokens";
+import {
+  IconChevronDown,
+  IconNotes,
+  IconPaperSim,
+  IconShield,
+} from "@trade-buddy/ui-tokens";
+
+import { PaperTradingPanel } from "@/components/panels/PaperTradingPanel";
+import type { PaperMarketSnapshot } from "@/lib/paper-trading";
+import { usePaperTrading } from "@/lib/paper-trading-store";
 
 interface BottomDockProps {
   symbol: SymbolMeta;
   provenance: DataProvenance;
   envStatus: AdapterEnvStatus;
+  activePaperSnapshot: PaperMarketSnapshot | null;
+  paperSnapshotsBySymbol: Record<string, PaperMarketSnapshot>;
+  markPriceBySymbol: Record<string, number>;
+  onSelectSymbol: (symbolId: string) => void;
+  onNotify?: (msg: string) => void;
 }
 
-type DockTab = "notes" | "provenance";
+type DockTab = "paper" | "notes" | "provenance";
 
-export function BottomDock({ symbol, provenance, envStatus }: BottomDockProps) {
+export function BottomDock({
+  symbol,
+  provenance,
+  envStatus,
+  activePaperSnapshot,
+  paperSnapshotsBySymbol,
+  markPriceBySymbol,
+  onSelectSymbol,
+  onNotify,
+}: BottomDockProps) {
   const [expanded, setExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState<DockTab>("notes");
+  const [tallPaper, setTallPaper] = useState(false);
+  const [activeTab, setActiveTab] = useState<DockTab>("paper");
   const [noteText, setNoteText] = useState("");
   const [savedAt, setSavedAt] = useState<string>("");
+
+  const { account } = usePaperTrading();
+  const openOrdersCount =
+    account?.orders.filter((o) => o.status === "open").length ?? 0;
+  const positionsCount = account?.positions.length ?? 0;
 
   const storageKey = `trade-buddy:note:${symbol.id}`;
 
@@ -52,11 +81,19 @@ export function BottomDock({ symbol, provenance, envStatus }: BottomDockProps) {
     }
   };
 
+  const dockHeight = !expanded
+    ? 32
+    : activeTab === "paper"
+    ? tallPaper
+      ? 368
+      : 276
+    : 196;
+
   return (
     <section
-      aria-label="底部研究笔记与数据说明面板"
+      aria-label="底部虚拟模拟盘、研究笔记与数据说明面板"
       className="tb-panel tb-border flex shrink-0 flex-col border-t transition-all"
-      style={{ height: expanded ? 196 : 32 }}
+      style={{ height: dockHeight }}
     >
       {/* Dock Header Bar (always 32px) */}
       <div className="flex h-[32px] shrink-0 items-center justify-between px-3 text-[11px]">
@@ -64,8 +101,44 @@ export function BottomDock({ symbol, provenance, envStatus }: BottomDockProps) {
           <button
             type="button"
             onClick={() => {
-              setActiveTab("notes");
-              if (!expanded) setExpanded(true);
+              if (expanded && activeTab === "paper") {
+                setExpanded(false);
+              } else {
+                setActiveTab("paper");
+                setExpanded(true);
+              }
+            }}
+            className={`flex items-center gap-1.5 rounded px-2 py-1 font-semibold transition-colors cursor-pointer ${
+              expanded && activeTab === "paper"
+                ? "bg-[rgba(245,158,11,0.18)] text-[var(--status-delayed)]"
+                : "tb-text-primary tb-hover"
+            }`}
+            title="打开纯本地虚拟资金模拟盘（1 倍现货，禁止卖空）"
+          >
+            <IconPaperSim size={13} className="text-[var(--status-delayed)]" />
+            <span>虚拟资金·模拟</span>
+            {account && (positionsCount > 0 || openOrdersCount > 0) && (
+              <span
+                className="rounded-full px-1.5 text-[10px] font-semibold tabular-nums"
+                style={{
+                  backgroundColor: "var(--accent-soft)",
+                  color: "var(--accent-primary)",
+                }}
+              >
+                {positionsCount}仓{openOrdersCount > 0 ? `/${openOrdersCount}挂` : ""}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (expanded && activeTab === "notes") {
+                setExpanded(false);
+              } else {
+                setActiveTab("notes");
+                setExpanded(true);
+              }
             }}
             className={`flex items-center gap-1.5 rounded px-2 py-1 font-medium transition-colors cursor-pointer ${
               expanded && activeTab === "notes"
@@ -80,8 +153,12 @@ export function BottomDock({ symbol, provenance, envStatus }: BottomDockProps) {
           <button
             type="button"
             onClick={() => {
-              setActiveTab("provenance");
-              if (!expanded) setExpanded(true);
+              if (expanded && activeTab === "provenance") {
+                setExpanded(false);
+              } else {
+                setActiveTab("provenance");
+                setExpanded(true);
+              }
             }}
             className={`flex items-center gap-1.5 rounded px-2 py-1 font-medium transition-colors cursor-pointer ${
               expanded && activeTab === "provenance"
@@ -99,6 +176,16 @@ export function BottomDock({ symbol, provenance, envStatus }: BottomDockProps) {
             当前来源：{provenance.provider}
             {provenance.dateRange ? `（${provenance.dateRange}）` : ""}
           </span>
+          {expanded && activeTab === "paper" && (
+            <button
+              type="button"
+              onClick={() => setTallPaper((v) => !v)}
+              title={tallPaper ? "恢复标准高度" : "增高模拟盘面板"}
+              className="tb-hover rounded px-1.5 py-0.5 text-[10px] tb-text-secondary cursor-pointer"
+            >
+              {tallPaper ? "标准高" : "加高"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
@@ -116,8 +203,23 @@ export function BottomDock({ symbol, provenance, envStatus }: BottomDockProps) {
 
       {/* Expanded Body */}
       {expanded && (
-        <div className="tb-border flex-1 overflow-y-auto border-t px-3 py-2 text-[12px]">
-          {activeTab === "notes" ? (
+        <div
+          className={`tb-border flex-1 border-t text-[12px] ${
+            activeTab === "paper"
+              ? "overflow-hidden"
+              : "overflow-y-auto px-3 py-2"
+          }`}
+        >
+          {activeTab === "paper" ? (
+            <PaperTradingPanel
+              activeSymbol={symbol}
+              activeSnapshot={activePaperSnapshot}
+              snapshotsBySymbol={paperSnapshotsBySymbol}
+              markPriceBySymbol={markPriceBySymbol}
+              onSelectSymbol={onSelectSymbol}
+              onNotify={onNotify}
+            />
+          ) : activeTab === "notes" ? (
             <div className="flex h-full flex-col gap-1.5">
               <div className="flex items-center justify-between text-[11px] tb-text-muted">
                 <span>

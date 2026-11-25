@@ -1257,3 +1257,56 @@ export function getWatchlistSummaries(): WatchlistSummaryItem[] {
     };
   });
 }
+
+/**
+ * 供选股筛选器服务端复用：优先读取已缓存的日线与报价（包含有 Key 时用户访问过的在线行情），
+ * 对 FRED 公开指数可按需轻量拉取，其余回退捆绑日线样本，绝不打爆免费 API 配额。
+ */
+export async function getDailySnapshotForScreener(
+  rawSymbol: SymbolMeta,
+  allowFredFetch = true
+): Promise<{
+  symbol: SymbolMeta;
+  bars: NormalizedBar[];
+  quote: NormalizedQuote;
+  provenance: DataProvenance;
+}> {
+  const symbol = resolveEffectiveSymbol(rawSymbol);
+  const cacheKey = `${symbol.id}:1D`;
+
+  let resolved =
+    BARS_CACHE.getFresh(cacheKey) ?? BARS_CACHE.getStale(cacheKey)?.value ?? null;
+
+  if (!resolved && allowFredFetch && FRED_SERIES_MAP[symbol.id]) {
+    const fredLive = await tryFetchFredSeries(symbol);
+    if (fredLive) {
+      BARS_CACHE.set(cacheKey, fredLive, DAILY_CACHE_TTL_MS, BARS_STALE_TTL_MS);
+      resolved = fredLive;
+    }
+  }
+
+  if (!resolved) {
+    resolved = getSampleDaily(symbol);
+  }
+
+  let quote = computeQuoteFromDailyBars(symbol.id, resolved.bars);
+  let provenance = resolved.provenance;
+
+  const cachedQuote =
+    QUOTE_CACHE.getFresh(`quote:${symbol.id}`) ??
+    QUOTE_CACHE.getStale(`quote:${symbol.id}`)?.value;
+  if (cachedQuote) {
+    quote = mergeQuoteWithLivePatch(quote, cachedQuote);
+    provenance = {
+      ...provenance,
+      quoteProvider: cachedQuote.provider,
+    };
+  }
+
+  return {
+    symbol,
+    bars: resolved.bars,
+    quote,
+    provenance,
+  };
+}

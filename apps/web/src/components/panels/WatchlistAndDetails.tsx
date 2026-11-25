@@ -18,7 +18,9 @@ interface WatchlistAndDetailsProps {
   activeSymbol: SymbolMeta;
   activeQuote: NormalizedQuote;
   activeProvenance: DataProvenance;
+  defaultMarket?: MarketCategory;
   onSelectSymbol: (symbolId: string) => void;
+  onOpenFundamentals?: () => void;
 }
 
 function formatVolume(vol: number): string {
@@ -77,7 +79,9 @@ export function WatchlistAndDetails({
   activeSymbol,
   activeQuote,
   activeProvenance,
+  defaultMarket = "US",
   onSelectSymbol,
+  onOpenFundamentals,
 }: WatchlistAndDetailsProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<
     Record<MarketCategory, boolean>
@@ -87,6 +91,13 @@ export function WatchlistAndDetails({
     HK: false,
     FUTURES_INDEX: false,
   });
+
+  const orderedGroups = useMemo(() => {
+    return [
+      defaultMarket,
+      ...GROUP_ORDER.filter((g) => g !== defaultMarket),
+    ];
+  }, [defaultMarket]);
 
   const grouped = useMemo(() => {
     const map: Record<MarketCategory, WatchlistSummaryItem[]> = {
@@ -142,9 +153,10 @@ export function WatchlistAndDetails({
 
         {/* Grouped Rows */}
         <div className="flex-1 overflow-y-auto">
-          {GROUP_ORDER.map((marketKey) => {
+          {orderedGroups.map((marketKey) => {
             const rows = grouped[marketKey];
             const collapsed = collapsedGroups[marketKey];
+            const isDefaultGroup = marketKey === defaultMarket;
             return (
               <div key={marketKey}>
                 <button
@@ -160,6 +172,17 @@ export function WatchlistAndDetails({
                       }`}
                     />
                     <span>{MARKET_GROUP_LABELS[marketKey]}</span>
+                    {isDefaultGroup && (
+                      <span
+                        className="rounded px-1 text-[9px] font-medium"
+                        style={{
+                          backgroundColor: "var(--accent-soft)",
+                          color: "var(--accent-primary)",
+                        }}
+                      >
+                        默认
+                      </span>
+                    )}
                   </span>
                   <span className="tabular-nums text-[10px] tb-text-muted">
                     {rows.length}
@@ -255,9 +278,21 @@ export function WatchlistAndDetails({
               {activeSymbol.nameEn ? ` · ${activeSymbol.nameEn}` : ""}
             </div>
           </div>
-          <span className="text-[10px] tb-text-muted shrink-0">
-            {activeSymbol.currency}
-          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onOpenFundamentals && (
+              <button
+                type="button"
+                onClick={onOpenFundamentals}
+                title="在右侧面板查看当前品种财务数据"
+                className="rounded border tb-border-subtle px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent-primary)] tb-hover cursor-pointer"
+              >
+                财务
+              </button>
+            )}
+            <span className="text-[10px] tb-text-muted">
+              {activeSymbol.currency}
+            </span>
+          </div>
         </div>
 
         {/* Big Price + Change */}

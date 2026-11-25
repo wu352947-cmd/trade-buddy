@@ -28,6 +28,10 @@ import type {
   ThemeMode,
 } from "@trade-buddy/shared-types";
 import { getChartPalette, IconClose } from "@trade-buddy/ui-tokens";
+import {
+  findNearestBarByTimestamp,
+  formatBarTimestamp,
+} from "@/lib/chart-sync";
 
 export interface KLineChartHandle {
   startDrawing: (
@@ -53,9 +57,16 @@ interface KLineChartStageProps {
   activeIndicators: IndicatorId[];
   activeTool: DrawingToolId;
   annotationText: string;
+  compact?: boolean;
+  externalCrosshairTimestamp?: number | null;
+  pickReplayStartMode?: boolean;
+  replayBadge?: string | null;
   onChangeAnnotationText: (val: string) => void;
   onCancelDrawingTool: () => void;
   onCrosshairChange: (bar: NormalizedBar | null, prevClose: number | null) => void;
+  onCrosshairTimestampChange?: (timestamp: number | null) => void;
+  onPickReplayStart?: (index: number, timestamp: number) => void;
+  onCancelPickReplayStart?: () => void;
   onOverlayCreated: (record: DrawnOverlayRecord) => void;
   onOverlayUpdated?: (id: string, label: string) => void;
   onRemoveIndicator: (id: IndicatorId) => void;
@@ -501,9 +512,16 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       activeIndicators,
       activeTool,
       annotationText,
+      compact = false,
+      externalCrosshairTimestamp = null,
+      pickReplayStartMode = false,
+      replayBadge = null,
       onChangeAnnotationText,
       onCancelDrawingTool,
       onCrosshairChange,
+      onCrosshairTimestampChange,
+      onPickReplayStart,
+      onCancelPickReplayStart,
       onOverlayCreated,
       onOverlayUpdated,
       onRemoveIndicator,
@@ -513,7 +531,13 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
     const containerRef = useRef<HTMLDivElement>(null);
     const chartRef = useRef<Chart | null>(null);
     const barsRef = useRef<NormalizedBar[]>(bars);
+    const renderedBarsRef = useRef<NormalizedBar[]>([]);
+    const prevSeriesKeyRef = useRef<string>("");
+    const subscribeBarCbRef = useRef<((data: NormalizedBar) => void) | null>(
+      null
+    );
     const pendingOverlayIdRef = useRef<string | null>(null);
+    const hadExternalCrosshairRef = useRef(false);
     const indicatorIdsRef = useRef<
       Partial<Record<IndicatorId, { id: string; paneId: string }>>
     >({});
@@ -522,9 +546,15 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
     const [clock, setClock] = useState("");
     const [hoverBar, setHoverBar] = useState<NormalizedBar | null>(null);
     const [hoverPrevClose, setHoverPrevClose] = useState<number | null>(null);
+    const [syncAlignNotice, setSyncAlignNotice] = useState<{
+      text: string;
+      title: string;
+    } | null>(null);
 
     const onCrosshairRef = useRef(onCrosshairChange);
     onCrosshairRef.current = onCrosshairChange;
+    const onCrosshairTsRef = useRef(onCrosshairTimestampChange);
+    onCrosshairTsRef.current = onCrosshairTimestampChange;
     const onOverlayCreatedRef = useRef(onOverlayCreated);
     onOverlayCreatedRef.current = onOverlayCreated;
     const onOverlayUpdatedRef = useRef(onOverlayUpdated);
@@ -535,6 +565,8 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
     symbolPrecRef.current = symbol.pricePrecision;
     const intervalRef = useRef(interval);
     intervalRef.current = interval;
+    const compactRef = useRef(compact);
+    compactRef.current = compact;
 
     barsRef.current = bars;
 
@@ -744,6 +776,14 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
           getBars: ({ callback }) => {
             callback(barsRef.current, false);
           },
+          subscribeBar: ({ callback }) => {
+            subscribeBarCbRef.current = (bar: NormalizedBar) => {
+              callback(bar);
+            };
+          },
+          unsubscribeBar: () => {
+            subscribeBarCbRef.current = null;
+          },
         });
 
         chart.setOffsetRightDistance(48);
@@ -762,13 +802,16 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
               close: ch.kLineData.close,
               volume: ch.kLineData.volume ?? 0,
             };
+            setSyncAlignNotice(null);
             setHoverBar(b);
             setHoverPrevClose(prev);
             onCrosshairRef.current(b, prev);
+            onCrosshairTsRef.current?.(b.timestamp);
           } else {
             setHoverBar(null);
             setHoverPrevClose(null);
             onCrosshairRef.current(null, null);
+            onCrosshairTsRef.current?.(null);
           }
         });
 
@@ -785,6 +828,7 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       return () => {
         disposed = true;
         observer?.disconnect();
+        subscribeBarCbRef.current = null;
         if (chartRef.current && disposeFn) {
           disposeFn(chartRef.current);
           chartRef.current = null;
@@ -799,21 +843,143 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       const chart = chartRef.current;
       if (!ready || !chart) return;
 
-      chart.setSymbol({
-        ticker: symbol.id,
-        pricePrecision: symbol.pricePrecision,
-        volumePrecision: 0,
-      });
-      chart.setPeriod(toKlinePeriod(interval));
-      chart.resetData();
+      const seriesKey = `${symbol.id}:${symbol.pricePrecision}:${interval}`;
+      const seriesChanged = prevSeriesKeyRef.current !== seriesKey;
+      const prevBars = renderedBarsRef.current;
 
-      // Default hover bar to latest bar
+      const isSingleBarAppend =
+        !seriesChanged &&
+        prevBars.length > 0 &&
+        bars.length === prevBars.length + 1 &&
+        bars[0].timestamp === prevBars[0].timestamp &&
+        bars[prevBars.length - 1].timestamp ===
+          prevBars[prevBars.length - 1].timestamp &&
+        bars[bars.length - 1].timestamp >
+          prevBars[prevBars.length - 1].timestamp &&
+        subscribeBarCbRef.current !== null;
+
+      if (isSingleBarAppend) {
+        subscribeBarCbRef.current?.(bars[bars.length - 1]);
+      } else if (seriesChanged) {
+        prevSeriesKeyRef.current = seriesKey;
+        chart.setSymbol({
+          ticker: symbol.id,
+          pricePrecision: symbol.pricePrecision,
+          volumePrecision: 0,
+        });
+        chart.setPeriod(toKlinePeriod(interval));
+        chart.resetData();
+      } else {
+        // Same symbol/interval (e.g. replay seek, reset, start, exit):
+        // preserve current barSpace while recalculating all indicators on visible prefix
+        const savedBarSpace = chart.getBarSpace()?.bar;
+        chart.resetData();
+        if (typeof savedBarSpace === "number" && savedBarSpace > 0) {
+          chart.setBarSpace(savedBarSpace);
+        }
+      }
+
+      renderedBarsRef.current = bars;
+
+      // Update default legend / hover readout to latest visible bar
       const last = bars[bars.length - 1] ?? null;
       const prev = bars.length >= 2 ? bars[bars.length - 2].close : null;
       setHoverBar(last);
       setHoverPrevClose(prev);
       onCrosshairRef.current(last, prev);
     }, [ready, symbol.id, symbol.pricePrecision, interval, bars]);
+
+    // Sync external linked crosshair by timestamp (exact or nearest bar)
+    useEffect(() => {
+      const chart = chartRef.current;
+      if (!ready || !chart) return;
+
+      if (externalCrosshairTimestamp === null) {
+        if (hadExternalCrosshairRef.current) {
+          hadExternalCrosshairRef.current = false;
+          setSyncAlignNotice(null);
+          chart.executeAction("onCrosshairChange", {} as Crosshair);
+        }
+        return;
+      }
+
+      hadExternalCrosshairRef.current = true;
+
+      const currentBars = barsRef.current;
+      const match = findNearestBarByTimestamp(
+        currentBars,
+        externalCrosshairTimestamp
+      );
+      if (!match) {
+        setSyncAlignNotice(null);
+        chart.executeAction("onCrosshairChange", {} as Crosshair);
+        return;
+      }
+
+      const prevClose =
+        match.index > 0 ? currentBars[match.index - 1]?.close ?? null : null;
+      setHoverBar(match.bar);
+      setHoverPrevClose(prevClose);
+
+      const pixel = chart.convertToPixel(
+        { dataIndex: match.index, value: match.bar.close },
+        { paneId: "candle_pane" }
+      );
+      const coord = Array.isArray(pixel) ? pixel[0] : pixel;
+      const size = chart.getSize("candle_pane", "main");
+      const inBounds =
+        typeof coord?.x === "number" &&
+        Number.isFinite(coord.x) &&
+        size !== null &&
+        coord.x >= 0 &&
+        coord.x <= size.width;
+
+      const matchedLabel = formatBarTimestamp(
+        match.bar.timestamp,
+        interval,
+        compact
+      );
+      const targetLabel = formatBarTimestamp(
+        externalCrosshairTimestamp,
+        interval,
+        false
+      );
+
+      if (inBounds) {
+        const clampedY =
+          typeof coord.y === "number" && Number.isFinite(coord.y)
+            ? Math.max(4, Math.min(size.height - 4, coord.y))
+            : Math.round(size.height / 2);
+        chart.executeAction("onCrosshairChange", {
+          x: coord.x,
+          y: clampedY,
+          paneId: "candle_pane",
+        });
+
+        if (!match.exact) {
+          setSyncAlignNotice({
+            text: `≈ ${matchedLabel}`,
+            title: `无相同时间戳（目标 ${targetLabel}），光标已自动落到最近一根 K 线（${formatBarTimestamp(
+              match.bar.timestamp,
+              interval,
+              false
+            )}）`,
+          });
+        } else {
+          setSyncAlignNotice(null);
+        }
+      } else {
+        chart.executeAction("onCrosshairChange", {} as Crosshair);
+        setSyncAlignNotice({
+          text: match.exact
+            ? `视口外 ${matchedLabel}`
+            : `视口外 ≈ ${matchedLabel}`,
+          title: `联动光标时间戳（${targetLabel}）位于当前视口范围之外，已匹配${
+            match.exact ? "同时间戳" : "最近一根"
+          } K 线（${formatBarTimestamp(match.bar.timestamp, interval, false)}）`,
+        });
+      }
+    }, [ready, externalCrosshairTimestamp, interval, compact, bars]);
 
     // Sync Theme / ColorScheme / ChartType styles dynamically
     useEffect(() => {
@@ -882,8 +1048,14 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
             currentMap[indId] = { id: createdId, paneId };
             chart.setPaneOptions({
               id: paneId,
-              height: indId === "VOL" ? 96 : 112,
-              minHeight: 60,
+              height: compactRef.current
+                ? indId === "VOL"
+                  ? 58
+                  : 66
+                : indId === "VOL"
+                ? 96
+                : 112,
+              minHeight: compactRef.current ? 40 : 60,
               dragEnabled: true,
             });
           }
@@ -891,6 +1063,30 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       }
       chart.resize();
     }, [ready, activeIndicators]);
+
+    // Adjust sub-pane heights smoothly when switching between single and multi-chart layouts
+    useEffect(() => {
+      const chart = chartRef.current;
+      if (!ready || !chart) return;
+      const currentMap = indicatorIdsRef.current;
+      for (const indId of ["VOL", "RSI", "MACD"] as const) {
+        const entry = currentMap[indId];
+        if (!entry) continue;
+        chart.setPaneOptions({
+          id: entry.paneId,
+          height: compact
+            ? indId === "VOL"
+              ? 58
+              : 66
+            : indId === "VOL"
+            ? 96
+            : 112,
+          minHeight: compact ? 40 : 60,
+          dragEnabled: true,
+        });
+      }
+      chart.resize();
+    }, [ready, compact]);
 
     const fitRange = useCallback((barCount: number | "all") => {
       const chart = chartRef.current;
@@ -1014,6 +1210,37 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       });
     };
 
+    const handleCanvasClick = useCallback(
+      (e: React.MouseEvent<HTMLDivElement>) => {
+        if (!pickReplayStartMode || !onPickReplayStart) return;
+        const chart = chartRef.current;
+        const el = containerRef.current;
+        const currentBars = barsRef.current;
+        if (!chart || !el || currentBars.length === 0) return;
+
+        const rect = el.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const converted = chart.convertFromPixel([{ x, y }], {
+          paneId: "candle_pane",
+        });
+        const pt = Array.isArray(converted) ? converted[0] : converted;
+        let idx = typeof pt?.dataIndex === "number" ? Math.round(pt.dataIndex) : -1;
+        if (idx < 0 && typeof pt?.timestamp === "number") {
+          const match = findNearestBarByTimestamp(currentBars, pt.timestamp);
+          idx = match ? match.index : -1;
+        }
+        if (idx < 0) return;
+        const clamped = Math.max(0, Math.min(idx, currentBars.length - 1));
+        onPickReplayStart(clamped, currentBars[clamped].timestamp);
+      },
+      [pickReplayStartMode, onPickReplayStart]
+    );
+
+    const handleCanvasMouseLeave = useCallback(() => {
+      onCrosshairTsRef.current?.(null);
+    }, []);
+
     const displayBar = hoverBar ?? bars[bars.length - 1] ?? null;
     const refClose =
       hoverPrevClose ??
@@ -1027,17 +1254,39 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
     return (
       <div className="tb-canvas relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {/* Main Canvas Area */}
-        <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div
+          className={`relative min-h-0 flex-1 overflow-hidden ${
+            pickReplayStartMode ? "cursor-crosshair" : ""
+          }`}
+          onClick={handleCanvasClick}
+          onMouseLeave={handleCanvasMouseLeave}
+        >
           <div ref={containerRef} className="h-full w-full" />
 
           {/* Top-Left Compact Chart Status Legend */}
-          <div className="pointer-events-none absolute left-2.5 top-1.5 z-10 flex flex-col gap-1 max-w-[calc(100%-96px)]">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] leading-tight">
-              <span className="font-bold text-[12px] tb-text-primary">
-                {symbol.ticker}
-              </span>
-              <span className="tb-text-secondary font-medium">{symbol.name}</span>
-              <span className="tb-text-muted">· {interval} · {symbol.exchange}</span>
+          <div
+            className={`pointer-events-none absolute left-2 top-1 z-10 flex flex-col gap-0.5 ${
+              compact ? "max-w-[calc(100%-74px)]" : "max-w-[calc(100%-96px)]"
+            }`}
+          >
+            <div
+              className={`flex flex-wrap items-center gap-x-1.5 gap-y-0.5 leading-tight ${
+                compact ? "text-[10px]" : "text-[11px]"
+              }`}
+            >
+              {!compact && (
+                <>
+                  <span className="font-bold text-[12px] tb-text-primary">
+                    {symbol.ticker}
+                  </span>
+                  <span className="tb-text-secondary font-medium">
+                    {symbol.name}
+                  </span>
+                  <span className="tb-text-muted">
+                    · {interval} · {symbol.exchange}
+                  </span>
+                </>
+              )}
 
               {/* Honest Non-Hideable Data Provenance Capsule */}
               <span
@@ -1057,12 +1306,45 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
                 }}
               >
                 {provenance.badge}
-                {provenance.dateRange ? ` (${provenance.dateRange})` : ""}
+                {!compact && provenance.dateRange
+                  ? ` (${provenance.dateRange})`
+                  : ""}
               </span>
+
+              {/* Replay Status Badge */}
+              {replayBadge && (
+                <span
+                  className="pointer-events-auto rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                  style={{
+                    backgroundColor: "rgba(245, 158, 11, 0.18)",
+                    color: "var(--status-delayed)",
+                  }}
+                >
+                  {replayBadge}
+                </span>
+              )}
+
+              {/* Crosshair Sync Nearest/Offscreen Alignment Notice */}
+              {syncAlignNotice && (
+                <span
+                  title={syncAlignNotice.title}
+                  className="pointer-events-auto rounded px-1.5 py-0.5 text-[10px] font-medium tabular-nums"
+                  style={{
+                    backgroundColor: "var(--accent-soft)",
+                    color: "var(--accent-primary)",
+                  }}
+                >
+                  光标 {syncAlignNotice.text}
+                </span>
+              )}
 
               {/* Live OHLCV Hover Readout */}
               {displayBar && (
-                <div className="flex items-center gap-1.5 tabular-nums text-[11px]">
+                <div
+                  className={`flex items-center gap-1.5 tabular-nums ${
+                    compact ? "text-[10px]" : "text-[11px]"
+                  }`}
+                >
                   <span className="tb-text-muted">
                     开{" "}
                     <span className={isUp ? "tb-up" : "tb-down"}>
@@ -1087,12 +1369,18 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
                       {displayBar.close.toFixed(prec)}
                     </span>
                   </span>
-                  <span className={isUp ? "tb-up font-medium" : "tb-down font-medium"}>
-                    {isUp ? "+" : ""}
-                    {diff.toFixed(prec)} ({isUp ? "+" : ""}
-                    {diffPct.toFixed(2)}%)
+                  <span
+                    className={
+                      isUp ? "tb-up font-medium" : "tb-down font-medium"
+                    }
+                  >
+                    {compact
+                      ? `${isUp ? "+" : ""}${diffPct.toFixed(2)}%`
+                      : `${isUp ? "+" : ""}${diff.toFixed(prec)} (${
+                          isUp ? "+" : ""
+                        }${diffPct.toFixed(2)}%)`}
                   </span>
-                  {displayBar.volume > 0 && (
+                  {displayBar.volume > 0 && !compact && (
                     <span className="tb-text-muted">
                       量{" "}
                       <span className="tb-text-secondary">
@@ -1110,12 +1398,20 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
                 <span
                   key={indId}
                   className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium tb-text-secondary border tb-border"
-                  style={{ backgroundColor: "rgba(19, 23, 34, 0.78)" }}
+                  style={{
+                    backgroundColor:
+                      theme === "dark"
+                        ? "rgba(19, 23, 34, 0.78)"
+                        : "rgba(247, 249, 252, 0.86)",
+                  }}
                 >
                   <span>{indId}</span>
                   <button
                     type="button"
-                    onClick={() => onRemoveIndicator(indId)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRemoveIndicator(indId);
+                    }}
                     title={`关闭 ${indId}`}
                     className="tb-text-muted hover:text-[#F2485B] cursor-pointer"
                   >
@@ -1126,8 +1422,39 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
             </div>
           </div>
 
+          {/* Replay Pick-Start Active Banner */}
+          {pickReplayStartMode && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="absolute left-1/2 top-2 z-20 -translate-x-1/2 flex items-center gap-2 rounded-md border px-3 py-1 text-[11px] shadow-lg"
+              style={{
+                backgroundColor: "var(--bg-elevated)",
+                borderColor: "var(--status-delayed)",
+              }}
+            >
+              <span
+                className="font-semibold"
+                style={{ color: "var(--status-delayed)" }}
+              >
+                点选回放起点
+              </span>
+              <span className="tb-text-secondary">
+                点击任意一根 K 线位置从此处开始回放（Esc 取消）
+              </span>
+              {onCancelPickReplayStart && (
+                <button
+                  type="button"
+                  onClick={onCancelPickReplayStart}
+                  className="rounded px-1.5 py-0.5 text-[10px] tb-text-muted tb-hover cursor-pointer"
+                >
+                  取消
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Drawing Tool Active Banner */}
-          {activeTool !== "cursor" && activeToolSpec && (
+          {!pickReplayStartMode && activeTool !== "cursor" && activeToolSpec && (
             <div
               className="absolute left-1/2 top-2 z-20 -translate-x-1/2 flex items-center gap-2 rounded-md border tb-border-subtle px-3 py-1 text-[11px] shadow-lg"
               style={{ backgroundColor: "var(--bg-elevated)" }}
@@ -1182,8 +1509,12 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
         </div>
 
         {/* Bottom Quick Range & Coordinate Axis Bar */}
-        <div className="tb-panel tb-border flex h-[28px] shrink-0 items-center justify-between border-t px-2.5 text-[11px]">
-          <div className="flex items-center gap-1">
+        <div
+          className={`tb-panel tb-border flex shrink-0 items-center justify-between border-t px-2 ${
+            compact ? "h-[22px] text-[10px]" : "h-[28px] px-2.5 text-[11px]"
+          }`}
+        >
+          <div className="flex items-center gap-0.5">
             {(
               [
                 ["1M", 22],
@@ -1204,11 +1535,15 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
             ))}
           </div>
 
-          <div className="flex items-center gap-2.5 tabular-nums tb-text-secondary">
-            <span className="hidden sm:inline text-[11px] tb-text-muted">
-              {clock ? `${clock} UTC+8` : "UTC+8"}
-            </span>
-            <div className="h-3 w-px bg-[var(--border-hairline)]" />
+          <div className="flex items-center gap-2 tabular-nums tb-text-secondary">
+            {!compact && (
+              <>
+                <span className="hidden sm:inline text-[11px] tb-text-muted">
+                  {clock ? `${clock} UTC+8` : "UTC+8"}
+                </span>
+                <div className="h-3 w-px bg-[var(--border-hairline)]" />
+              </>
+            )}
             <button
               type="button"
               onClick={handleTogglePctScale}

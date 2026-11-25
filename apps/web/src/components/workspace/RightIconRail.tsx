@@ -4,6 +4,7 @@ import React from "react";
 import {
   IconCalendar,
   IconDataWindow,
+  IconFundamentals,
   IconNews,
   IconObjectTree,
   IconWatchlist,
@@ -13,6 +14,7 @@ export type RightPanelTab =
   | "watchlist"
   | "data"
   | "tree"
+  | "fundamentals"
   | "news"
   | "calendar";
 
@@ -41,6 +43,11 @@ const RAIL_ITEMS: Array<{
     id: "tree",
     label: "对象树（管理指标与画线）",
     icon: <IconObjectTree size={18} />,
+  },
+  {
+    id: "fundamentals",
+    label: "财务数据（美股 SEC EDGAR 财报）",
+    icon: <IconFundamentals size={18} />,
   },
   {
     id: "news",

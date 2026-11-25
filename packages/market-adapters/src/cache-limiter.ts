@@ -51,6 +51,8 @@ interface ProviderState {
   lastRequestAt: number;
   cooldownUntil: number;
   consecutiveRateLimits: number;
+  lastSuccessAt?: number;
+  lastErrorAt?: number;
   lastError?: string;
 }
 
@@ -143,7 +145,9 @@ export function recordRateLimitBackoff(
   const baseSec = retryAfterSeconds && retryAfterSeconds > 0
     ? retryAfterSeconds
     : Math.min(600, 60 * Math.pow(2, st.consecutiveRateLimits - 1));
-  st.cooldownUntil = Date.now() + baseSec * 1000;
+  const now = Date.now();
+  st.cooldownUntil = now + baseSec * 1000;
+  st.lastErrorAt = now;
   st.lastError = `HTTP 429 限流退避 ${baseSec}s`;
 }
 
@@ -156,14 +160,39 @@ export function recordTransientFailure(
   cooldownSec = 20
 ): void {
   const st = getOrInitState(provider);
-  st.cooldownUntil = Math.max(st.cooldownUntil, Date.now() + cooldownSec * 1000);
+  const now = Date.now();
+  st.cooldownUntil = Math.max(st.cooldownUntil, now + cooldownSec * 1000);
+  st.lastErrorAt = now;
   st.lastError = errorLabel;
 }
 
 export function recordProviderSuccess(provider: ProviderKey): void {
   const st = getOrInitState(provider);
   st.consecutiveRateLimits = 0;
+  st.lastSuccessAt = Date.now();
   st.lastError = undefined;
+}
+
+export interface ProviderRuntimeHealth {
+  lastSuccessAt?: number;
+  lastErrorAt?: number;
+  lastError?: string;
+  inCooldown: boolean;
+}
+
+export function getProviderRuntimeHealth(
+  provider: ProviderKey
+): ProviderRuntimeHealth {
+  const st = providerStates.get(provider);
+  if (!st) {
+    return { inCooldown: false };
+  }
+  return {
+    lastSuccessAt: st.lastSuccessAt,
+    lastErrorAt: st.lastErrorAt,
+    lastError: st.lastError,
+    inCooldown: st.cooldownUntil > Date.now(),
+  };
 }
 
 export interface StaleCacheEntry<T> {
