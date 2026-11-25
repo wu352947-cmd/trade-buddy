@@ -1,20 +1,27 @@
 import {
   DEFAULT_PAPER_INITIAL_CASH,
+  DEFAULT_PAPER_SETTINGS,
   PaperAccountSchema,
   PaperOrderInputSchema,
+  PaperSettingsSchema,
   type NormalizedBar,
   type PaperAccount,
+  type PaperEquityPoint,
   type PaperFill,
   type PaperMatchMode,
   type PaperOrder,
   type PaperOrderInput,
+  type PaperOrderSide,
+  type PaperOrderType,
   type PaperPosition,
+  type PaperSettings,
 } from "@trade-buddy/shared-types";
 
 export const PAPER_ACCOUNT_STORAGE_KEY = "trade-buddy:paper-account:v1";
 const EPSILON = 1e-8;
 const MAX_STORED_FILLS = 500;
 const MAX_STORED_CLOSED_ORDERS = 300;
+const MAX_EQUITY_POINTS = 1000;
 
 export interface PaperMarketSnapshot {
   symbolId: string;
@@ -50,6 +57,7 @@ export interface PaperAccountMetrics {
   totalEquity: number;
   unrealizedPnl: number;
   realizedPnl: number;
+  totalFees: number;
   totalPnl: number;
   totalPnlPct: number;
   openOrdersCount: number;
@@ -68,14 +76,188 @@ function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${rand}`;
 }
 
+export function normalizePaperSettings(
+  raw?: Partial<PaperSettings> | null
+): PaperSettings {
+  const parsed = PaperSettingsSchema.safeParse({
+    ...DEFAULT_PAPER_SETTINGS,
+    ...(raw ?? {}),
+  });
+  return parsed.success ? parsed.data : { ...DEFAULT_PAPER_SETTINGS };
+}
+
+/**
+ * Compute commission fee for a notional value under current feeRatePct (%) and minFee.
+ */
+export function computePaperFee(
+  notional: number,
+  settings: Pick<PaperSettings, "feeRatePct" | "minFee">
+): number {
+  if (!Number.isFinite(notional) || notional <= 0) return 0;
+  const rate = Math.max(0, settings.feeRatePct) / 100;
+  const minFee = Math.max(0, settings.minFee);
+  if (rate <= 0 && minFee <= 0) return 0;
+  return roundMoney(Math.max(notional * rate, minFee));
+}
+
+/**
+ * Compute execution price after applying slippage (% of reference price).
+ * - Market buy: ref * (1 + slippage)
+ * - Market sell: ref * (1 - slippage)
+ * - Limit buy: min(limitPrice, ref * (1 + slippage)) — never worse than limitPrice
+ * - Limit sell: max(limitPrice, ref * (1 - slippage)) — never worse than limitPrice
+ */
+export function computeExecutionPrice(
+  side: PaperOrderSide,
+  type: PaperOrderType,
+  referencePrice: number,
+  limitPrice: number | undefined,
+  slippagePct: number
+): number {
+  const slipRatio = Math.max(0, slippagePct) / 100;
+  if (side === "buy") {
+    const slipped = roundMoney(referencePrice * (1 + slipRatio));
+    if (type === "limit" && limitPrice !== undefined) {
+      return Math.min(roundMoney(limitPrice), slipped);
+    }
+    return slipped;
+  }
+  const slipped = roundMoney(Math.max(1e-6, referencePrice * (1 - slipRatio)));
+  if (type === "limit" && limitPrice !== undefined) {
+    return Math.max(roundMoney(limitPrice), slipped);
+  }
+  return slipped;
+}
+
+/**
+ * Maximum affordable buy quantity given available cash, unit execution price, and fee settings.
+ */
+export function computeMaxBuyQty(
+  availableCash: number,
+  unitPrice: number,
+  settings: Pick<PaperSettings, "feeRatePct" | "minFee">
+): number {
+  if (
+    !Number.isFinite(availableCash) ||
+    availableCash <= 0 ||
+    !Number.isFinite(unitPrice) ||
+    unitPrice <= 0
+  ) {
+    return 0;
+  }
+  const rate = Math.max(0, settings.feeRatePct) / 100;
+  const minFee = Math.max(0, settings.minFee);
+  if (availableCash <= minFee + EPSILON) return 0;
+
+  const maxNotionalByRate = availableCash / (1 + rate);
+  const maxNotionalByMinFee = availableCash - minFee;
+  const maxNotional = Math.min(maxNotionalByRate, maxNotionalByMinFee);
+  if (maxNotional <= 0) return 0;
+
+  const rawQty = maxNotional / unitPrice;
+  if (rawQty >= 1) {
+    let qty = Math.floor(rawQty);
+    while (qty > 0) {
+      const n = roundMoney(qty * unitPrice);
+      if (n + computePaperFee(n, settings) <= availableCash + 1e-5) {
+        return qty;
+      }
+      qty -= 1;
+    }
+    return 0;
+  }
+
+  const fractional = Math.floor(rawQty * 10000) / 10000;
+  if (fractional <= 0) return 0;
+  const n = roundMoney(fractional * unitPrice);
+  return n + computePaperFee(n, settings) <= availableCash + 1e-5
+    ? fractional
+    : 0;
+}
+
+function buildEquityPoint(
+  cash: number,
+  positions: PaperPosition[],
+  realizedPnl: number,
+  totalFees: number,
+  reason: PaperEquityPoint["reason"],
+  markPriceBySymbol?: Record<string, number>,
+  label?: string,
+  recordedAtOverride?: string
+): PaperEquityPoint {
+  let marketValue = 0;
+  for (const pos of positions) {
+    const live = markPriceBySymbol?.[pos.symbolId];
+    const mark =
+      typeof live === "number" && Number.isFinite(live) && live > 0
+        ? live
+        : pos.lastKnownPrice;
+    marketValue += pos.quantity * mark;
+  }
+  marketValue = roundMoney(marketValue);
+  const equity = roundMoney(cash + marketValue);
+  const recordedAt = recordedAtOverride ?? new Date().toISOString();
+  const parsedTs = Date.parse(recordedAt);
+  return {
+    timestamp: Number.isFinite(parsedTs) ? parsedTs : Date.now(),
+    recordedAt,
+    equity,
+    cash: roundMoney(cash),
+    marketValue,
+    realizedPnl: roundMoney(realizedPnl),
+    totalFees: roundMoney(totalFees),
+    reason,
+    label,
+  };
+}
+
+function appendEquityPoint(
+  curve: PaperEquityPoint[],
+  point: PaperEquityPoint
+): PaperEquityPoint[] {
+  const next = [...curve, point];
+  if (next.length <= MAX_EQUITY_POINTS) return next;
+
+  // Prefer pruning oldest "mark" samples so "init" and "fill" milestones remain intact
+  const trimmed = [...next];
+  let excess = trimmed.length - MAX_EQUITY_POINTS;
+  for (let i = 1; i < trimmed.length - 1 && excess > 0; ) {
+    if (trimmed[i].reason === "mark") {
+      trimmed.splice(i, 1);
+      excess -= 1;
+    } else {
+      i += 1;
+    }
+  }
+  if (trimmed.length > MAX_EQUITY_POINTS) {
+    // Always preserve index 0 (init) and keep most recent points
+    const head = trimmed[0];
+    const tail = trimmed.slice(trimmed.length - (MAX_EQUITY_POINTS - 1));
+    return [head, ...tail];
+  }
+  return trimmed;
+}
+
 export function createPaperAccount(
-  rawInitialCash: number = DEFAULT_PAPER_INITIAL_CASH
+  rawInitialCash: number = DEFAULT_PAPER_INITIAL_CASH,
+  settingsOverride?: Partial<PaperSettings>
 ): PaperAccount {
   const initialCash =
     Number.isFinite(rawInitialCash) && rawInitialCash > 0
       ? roundMoney(rawInitialCash)
       : DEFAULT_PAPER_INITIAL_CASH;
   const now = new Date().toISOString();
+  const settings = normalizePaperSettings(settingsOverride);
+  const initPoint = buildEquityPoint(
+    initialCash,
+    [],
+    0,
+    0,
+    "init",
+    undefined,
+    "账户初始化",
+    now
+  );
 
   return PaperAccountSchema.parse({
     version: 1,
@@ -85,12 +267,68 @@ export function createPaperAccount(
     initialCash,
     cash: initialCash,
     realizedPnl: 0,
+    totalFees: 0,
+    settings,
     positions: [],
     orders: [],
     fills: [],
+    equityCurve: [initPoint],
     createdAt: now,
     updatedAt: now,
   });
+}
+
+/**
+ * Migrate legacy v1 accounts (e.g. from Batch 3C without settings/totalFees/equityCurve)
+ * seamlessly without losing cash, positions, open orders, or fills.
+ */
+export function migratePaperAccount(raw: unknown): PaperAccount | null {
+  const validated = PaperAccountSchema.safeParse(raw);
+  if (!validated.success) return null;
+
+  const data = validated.data;
+  let totalFees = data.totalFees;
+  if (totalFees === 0 && data.fills.length > 0) {
+    const sumFees = data.fills.reduce((acc, f) => acc + (f.fee ?? 0), 0);
+    if (sumFees > 0) {
+      totalFees = roundMoney(sumFees);
+    }
+  }
+
+  let equityCurve = data.equityCurve;
+  if (equityCurve.length === 0) {
+    const initPoint = buildEquityPoint(
+      data.initialCash,
+      [],
+      0,
+      0,
+      "init",
+      undefined,
+      "账户初始化",
+      data.createdAt
+    );
+    equityCurve = [initPoint];
+    if (data.fills.length > 0 || data.positions.length > 0) {
+      const migratedCurrent = buildEquityPoint(
+        data.cash,
+        data.positions,
+        data.realizedPnl,
+        totalFees,
+        "mark",
+        undefined,
+        "迁移恢复快照",
+        data.updatedAt
+      );
+      equityCurve = appendEquityPoint(equityCurve, migratedCurrent);
+    }
+  }
+
+  return {
+    ...data,
+    totalFees,
+    settings: normalizePaperSettings(data.settings),
+    equityCurve,
+  };
 }
 
 export function loadPaperAccount(): PaperAccount | null {
@@ -99,8 +337,7 @@ export function loadPaperAccount(): PaperAccount | null {
     const raw = window.localStorage.getItem(PAPER_ACCOUNT_STORAGE_KEY);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
-    const validated = PaperAccountSchema.safeParse(parsed);
-    return validated.success ? validated.data : null;
+    return migratePaperAccount(parsed);
   } catch {
     return null;
   }
@@ -122,11 +359,30 @@ export function savePaperAccount(account: PaperAccount | null): void {
   }
 }
 
-export function computeFrozenCash(orders: PaperOrder[]): number {
+export function updatePaperAccountSettings(
+  account: PaperAccount,
+  patch: Partial<PaperSettings>
+): PaperAccount {
+  const nextSettings = normalizePaperSettings({
+    ...account.settings,
+    ...patch,
+  });
+  return {
+    ...account,
+    settings: nextSettings,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function computeFrozenCash(
+  orders: PaperOrder[],
+  settings: Pick<PaperSettings, "feeRatePct" | "minFee"> = DEFAULT_PAPER_SETTINGS
+): number {
   let sum = 0;
   for (const o of orders) {
     if (o.status === "open" && o.side === "buy" && o.limitPrice) {
-      sum += o.limitPrice * o.quantity;
+      const notional = o.limitPrice * o.quantity;
+      sum += notional + computePaperFee(notional, settings);
     }
   }
   return roundMoney(sum);
@@ -146,7 +402,10 @@ export function computeFrozenSellQty(
 }
 
 export function getAvailableCash(account: PaperAccount): number {
-  return Math.max(0, roundMoney(account.cash - computeFrozenCash(account.orders)));
+  return Math.max(
+    0,
+    roundMoney(account.cash - computeFrozenCash(account.orders, account.settings))
+  );
 }
 
 export function getAvailableSellQty(
@@ -163,7 +422,7 @@ export function computeAccountMetrics(
   account: PaperAccount,
   markPriceBySymbol: Record<string, number>
 ): PaperAccountMetrics {
-  const frozenCash = computeFrozenCash(account.orders);
+  const frozenCash = computeFrozenCash(account.orders, account.settings);
   const availableCash = Math.max(0, roundMoney(account.cash - frozenCash));
   let marketValue = 0;
   let costBasis = 0;
@@ -184,7 +443,9 @@ export function computeAccountMetrics(
   const totalPnl = roundMoney(totalEquity - account.initialCash);
   const totalPnlPct =
     account.initialCash > 0 ? (totalPnl / account.initialCash) * 100 : 0;
-  const openOrdersCount = account.orders.filter((o) => o.status === "open").length;
+  const openOrdersCount = account.orders.filter(
+    (o) => o.status === "open"
+  ).length;
 
   return {
     initialCash: account.initialCash,
@@ -195,9 +456,40 @@ export function computeAccountMetrics(
     totalEquity,
     unrealizedPnl,
     realizedPnl: account.realizedPnl,
+    totalFees: account.totalFees,
     totalPnl,
     totalPnlPct,
     openOrdersCount,
+  };
+}
+
+/**
+ * Sample a mark-to-market equity point if equity changed meaningfully.
+ */
+export function recordEquityMarkSample(
+  account: PaperAccount,
+  markPriceBySymbol: Record<string, number>,
+  label?: string
+): { account: PaperAccount; recorded: boolean } {
+  const pt = buildEquityPoint(
+    account.cash,
+    account.positions,
+    account.realizedPnl,
+    account.totalFees,
+    "mark",
+    markPriceBySymbol,
+    label
+  );
+  const last = account.equityCurve[account.equityCurve.length - 1];
+  if (last && Math.abs(pt.equity - last.equity) < 0.01) {
+    return { account, recorded: false };
+  }
+  return {
+    account: {
+      ...account,
+      equityCurve: appendEquityPoint(account.equityCurve, pt),
+    },
+    recorded: true,
   };
 }
 
@@ -212,32 +504,51 @@ function pruneOrders(orders: PaperOrder[]): PaperOrder[] {
 function applyExecution(
   account: PaperAccount,
   order: PaperOrder,
-  fillPrice: number,
+  referencePrice: number,
   matchMode: PaperMatchMode,
   barTimestamp: number | null,
-  barTimeLabel?: string
+  barTimeLabel?: string,
+  markPriceBySymbol?: Record<string, number>
 ): { account: PaperAccount; order: PaperOrder; fill: PaperFill } | null {
-  const execPrice = roundMoney(fillPrice);
+  const refPrice = roundMoney(referencePrice);
+  const execPrice = computeExecutionPrice(
+    order.side,
+    order.type,
+    refPrice,
+    order.limitPrice,
+    account.settings.slippagePct
+  );
   const qty = roundQty(order.quantity);
   const notional = roundMoney(execPrice * qty);
+  const fee = computePaperFee(notional, account.settings);
+  const actualSlippagePct =
+    refPrice > 0
+      ? roundMoney((Math.abs(execPrice - refPrice) / refPrice) * 100)
+      : 0;
   const now = new Date().toISOString();
 
   let nextCash = account.cash;
   let nextRealizedPnl = account.realizedPnl;
+  const nextTotalFees = roundMoney(account.totalFees + fee);
   let fillRealizedPnl: number | null = null;
-  const nextPositions: PaperPosition[] = account.positions.map((p) => ({ ...p }));
+  const nextPositions: PaperPosition[] = account.positions.map((p) => ({
+    ...p,
+  }));
   const posIdx = nextPositions.findIndex((p) => p.symbolId === order.symbolId);
 
   if (order.side === "buy") {
-    if (notional > nextCash + 1e-5) {
+    const totalDebit = roundMoney(notional + fee);
+    if (totalDebit > nextCash + 1e-5) {
       return null;
     }
-    nextCash = Math.max(0, roundMoney(nextCash - notional));
+    nextCash = Math.max(0, roundMoney(nextCash - totalDebit));
     if (posIdx >= 0) {
       const existing = nextPositions[posIdx];
       const combinedQty = roundQty(existing.quantity + qty);
+      // Fold buy fee into unit cost basis so avgCost is the exact break-even price
+      // and realizedPnl + unrealizedPnl === totalEquity - initialCash always holds.
       const weightedCost = roundMoney(
-        (existing.avgCost * existing.quantity + notional) / combinedQty
+        (existing.avgCost * existing.quantity + notional + fee) / combinedQty
       );
       nextPositions[posIdx] = {
         ...existing,
@@ -247,6 +558,7 @@ function applyExecution(
         updatedAt: now,
       };
     } else {
+      const unitCost = roundMoney((notional + fee) / qty);
       nextPositions.push({
         symbolId: order.symbolId,
         ticker: order.ticker,
@@ -254,7 +566,7 @@ function applyExecution(
         currency: order.currency,
         pricePrecision: order.pricePrecision,
         quantity: qty,
-        avgCost: execPrice,
+        avgCost: unitCost,
         lastKnownPrice: execPrice,
         updatedAt: now,
       });
@@ -266,8 +578,9 @@ function applyExecution(
     if (qty > existing.quantity + EPSILON) {
       return null;
     }
-    nextCash = roundMoney(nextCash + notional);
-    fillRealizedPnl = roundMoney((execPrice - existing.avgCost) * qty);
+    nextCash = Math.max(0, roundMoney(nextCash + notional - fee));
+    // existing.avgCost already includes amortized buy fee; subtract sell fee here
+    fillRealizedPnl = roundMoney((execPrice - existing.avgCost) * qty - fee);
     nextRealizedPnl = roundMoney(nextRealizedPnl + fillRealizedPnl);
 
     const remaining = roundQty(existing.quantity - qty);
@@ -304,7 +617,10 @@ function applyExecution(
     type: order.type,
     quantity: qty,
     price: execPrice,
+    referencePrice: refPrice,
+    slippagePct: actualSlippagePct,
     notional,
+    fee,
     realizedPnl: fillRealizedPnl,
     matchMode,
     barTimestamp,
@@ -317,6 +633,24 @@ function applyExecution(
     ? account.orders.map((o) => (o.id === order.id ? filledOrder : o))
     : [filledOrder, ...account.orders];
 
+  const markMapForPoint: Record<string, number> = {
+    ...(markPriceBySymbol ?? {}),
+    [order.symbolId]: refPrice,
+  };
+  const fillLabel = `${order.side === "buy" ? "买入" : "卖出"} ${order.ticker}${
+    barTimeLabel ? ` (${barTimeLabel})` : ""
+  }`;
+  const equityPoint = buildEquityPoint(
+    nextCash,
+    nextPositions,
+    nextRealizedPnl,
+    nextTotalFees,
+    "fill",
+    markMapForPoint,
+    fillLabel,
+    now
+  );
+
   const nextAccount: PaperAccount = {
     ...account,
     leverage: 1,
@@ -324,9 +658,11 @@ function applyExecution(
     isVirtualSimulation: true,
     cash: nextCash,
     realizedPnl: nextRealizedPnl,
+    totalFees: nextTotalFees,
     positions: nextPositions,
     orders: pruneOrders(updatedOrders),
     fills: [fill, ...account.fills].slice(0, MAX_STORED_FILLS),
+    equityCurve: appendEquityPoint(account.equityCurve, equityPoint),
     updatedAt: now,
   };
 
@@ -340,7 +676,8 @@ function applyExecution(
 export function submitPaperOrder(
   account: PaperAccount,
   rawInput: PaperOrderInput | Record<string, unknown>,
-  marketSnap: PaperMarketSnapshot | null
+  marketSnap: PaperMarketSnapshot | null,
+  markPriceBySymbol?: Record<string, number>
 ): PaperOrderResult {
   // Explicit pre-check for forbidden parameters
   if (
@@ -407,17 +744,29 @@ export function submitPaperOrder(
       ? roundMoney(input.limitPrice)
       : undefined;
 
-  // 1x Spot cash & position constraints
+  // 1x Spot cash & position constraints (including slippage & fee!)
   if (input.side === "buy") {
     const availableCash = getAvailableCash(account);
     const checkPrice =
-      input.type === "market" ? marketSnap.currentPrice : limitPrice!;
-    const required = roundMoney(checkPrice * qty);
+      input.type === "market"
+        ? computeExecutionPrice(
+            "buy",
+            "market",
+            marketSnap.currentPrice,
+            undefined,
+            account.settings.slippagePct
+          )
+        : limitPrice!;
+    const checkNotional = roundMoney(checkPrice * qty);
+    const checkFee = computePaperFee(checkNotional, account.settings);
+    const required = roundMoney(checkNotional + checkFee);
     if (required > availableCash + 1e-5) {
       return {
         ok: false,
         account,
-        error: `可用虚拟现金不足（需 ${required.toLocaleString("zh-CN", {
+        error: `可用虚拟现金不足（含手续费${
+          checkFee > 0 ? ` ${checkFee.toFixed(2)}` : ""
+        }需 ${required.toLocaleString("zh-CN", {
           maximumFractionDigits: 2,
         })}，可用 ${availableCash.toLocaleString("zh-CN", {
           maximumFractionDigits: 2,
@@ -463,7 +812,7 @@ export function submitPaperOrder(
     lastEvaluatedBarTimestamp: marketSnap.barTimestamp,
   };
 
-  // Market order fills immediately at current visible/replay price
+  // Market order fills immediately at current visible/replay price with slippage & fee
   if (input.type === "market") {
     const executed = applyExecution(
       account,
@@ -471,21 +820,26 @@ export function submitPaperOrder(
       marketSnap.currentPrice,
       marketSnap.mode,
       marketSnap.barTimestamp,
-      marketSnap.barTimeLabel
+      marketSnap.barTimeLabel,
+      markPriceBySymbol
     );
     if (!executed) {
       return {
         ok: false,
         account,
-        error: "撮合执行失败，请检查虚拟资金或可用持仓",
+        error: "撮合执行失败，请检查虚拟资金（含手续费）或可用持仓",
       };
     }
+    const feeText =
+      executed.fill.fee > 0 ? ` · 手续费 ${executed.fill.fee.toFixed(2)}` : "";
     return {
       ok: true,
       account: executed.account,
       order: executed.order,
       fill: executed.fill,
-      message: `虚拟市价${input.side === "buy" ? "买入" : "卖出"}已成交：${input.ticker} × ${qty} @ ${executed.fill.price.toFixed(input.pricePrecision)}`,
+      message: `虚拟市价${input.side === "buy" ? "买入" : "卖出"}已成交：${
+        input.ticker
+      } × ${qty} @ ${executed.fill.price.toFixed(input.pricePrecision)}${feeText}`,
     };
   }
 
@@ -502,15 +856,20 @@ export function submitPaperOrder(
       marketSnap.currentPrice,
       marketSnap.mode,
       marketSnap.barTimestamp,
-      marketSnap.barTimeLabel
+      marketSnap.barTimeLabel,
+      markPriceBySymbol
     );
     if (executed) {
+      const feeText =
+        executed.fill.fee > 0 ? ` · 手续费 ${executed.fill.fee.toFixed(2)}` : "";
       return {
         ok: true,
         account: executed.account,
         order: executed.order,
         fill: executed.fill,
-        message: `虚拟限价${input.side === "buy" ? "买" : "卖"}单即时成交：${input.ticker} × ${qty} @ ${executed.fill.price.toFixed(input.pricePrecision)}`,
+        message: `虚拟限价${input.side === "buy" ? "买" : "卖"}单即时成交：${
+          input.ticker
+        } × ${qty} @ ${executed.fill.price.toFixed(input.pricePrecision)}${feeText}`,
       };
     }
   }
@@ -526,7 +885,9 @@ export function submitPaperOrder(
     ok: true,
     account: nextAccount,
     order: baseOrder,
-    message: `已提交虚拟限价${input.side === "buy" ? "买" : "卖"}单：${input.ticker} × ${qty} @ ${limitPrice!.toFixed(input.pricePrecision)}`,
+    message: `已提交虚拟限价${input.side === "buy" ? "买" : "卖"}单：${
+      input.ticker
+    } × ${qty} @ ${limitPrice!.toFixed(input.pricePrecision)}`,
   };
 }
 
@@ -564,13 +925,13 @@ function checkBarLimitTrigger(
   const limit = order.limitPrice;
   if (order.side === "buy") {
     if (bar.low <= limit) {
-      // If bar gapped below limit, fill at open; otherwise fill at limit
+      // If bar gapped below limit, reference is open; otherwise limit
       return Math.max(bar.low, Math.min(bar.open, limit));
     }
     return null;
   }
   if (bar.high >= limit) {
-    // If bar gapped above limit, fill at open; otherwise fill at limit
+    // If bar gapped above limit, reference is open; otherwise limit
     return Math.min(bar.high, Math.max(bar.open, limit));
   }
   return null;
@@ -581,7 +942,8 @@ function checkBarLimitTrigger(
  */
 export function evaluatePendingOrders(
   account: PaperAccount,
-  snapshotsBySymbol: Record<string, PaperMarketSnapshot>
+  snapshotsBySymbol: Record<string, PaperMarketSnapshot>,
+  markPriceBySymbol?: Record<string, number>
 ): PaperMatchResult {
   const openOrders = account.orders.filter((o) => o.status === "open");
   if (openOrders.length === 0) {
@@ -595,12 +957,18 @@ export function evaluatePendingOrders(
   let changed = false;
 
   for (const oid of orderedIds) {
-    const order = working.orders.find((o) => o.id === oid && o.status === "open");
+    const order = working.orders.find(
+      (o) => o.id === oid && o.status === "open"
+    );
     if (!order || order.type !== "limit" || order.limitPrice === undefined) {
       continue;
     }
     const snap = snapshotsBySymbol[order.symbolId];
-    if (!snap || !Number.isFinite(snap.currentPrice) || snap.currentPrice <= 0) {
+    if (
+      !snap ||
+      !Number.isFinite(snap.currentPrice) ||
+      snap.currentPrice <= 0
+    ) {
       continue;
     }
 
@@ -629,17 +997,18 @@ export function evaluatePendingOrders(
           }
         }
 
-        const fillPrice = checkBarLimitTrigger(order, item.bar);
+        const fillRefPrice = checkBarLimitTrigger(order, item.bar);
         latestSeenTs = ts;
 
-        if (fillPrice !== null) {
+        if (fillRefPrice !== null) {
           const executed = applyExecution(
             working,
             order,
-            fillPrice,
+            fillRefPrice,
             "replay",
             ts,
-            item.timeLabel
+            item.timeLabel,
+            markPriceBySymbol
           );
           if (executed) {
             working = executed.account;
@@ -664,27 +1033,31 @@ export function evaluatePendingOrders(
       }
     } else {
       // Non-replay latest quote/bar matching
-      let fillPrice: number | null = null;
+      let fillRefPrice: number | null = null;
       if (order.side === "buy" && snap.currentPrice <= order.limitPrice) {
-        fillPrice = snap.currentPrice;
-      } else if (order.side === "sell" && snap.currentPrice >= order.limitPrice) {
-        fillPrice = snap.currentPrice;
+        fillRefPrice = snap.currentPrice;
+      } else if (
+        order.side === "sell" &&
+        snap.currentPrice >= order.limitPrice
+      ) {
+        fillRefPrice = snap.currentPrice;
       } else if (
         snap.bar &&
         order.lastEvaluatedBarTimestamp !== null &&
         snap.bar.timestamp > order.lastEvaluatedBarTimestamp
       ) {
-        fillPrice = checkBarLimitTrigger(order, snap.bar);
+        fillRefPrice = checkBarLimitTrigger(order, snap.bar);
       }
 
-      if (fillPrice !== null) {
+      if (fillRefPrice !== null) {
         const executed = applyExecution(
           working,
           order,
-          fillPrice,
+          fillRefPrice,
           "latest",
           snap.barTimestamp,
-          snap.barTimeLabel
+          snap.barTimeLabel,
+          markPriceBySymbol
         );
         if (executed) {
           working = executed.account;

@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AlertTriggerEvent,
   BarsResponse,
   ChartType,
   ColorScheme,
@@ -13,12 +14,19 @@ import type {
   LayoutSyncConfig,
   MarketCategory,
   NormalizedBar,
+  PaneId,
   PaneLinkOverrides,
+  TemplateDrawing,
   ThemeMode,
+  WatchlistGroup,
   WatchlistSummaryItem,
+  WorkspaceTemplate,
+  WorkspaceTemplatesStore,
 } from "@trade-buddy/shared-types";
 import type { AdapterEnvStatus } from "@trade-buddy/market-adapters";
 import {
+  IconBell,
+  IconClose,
   IconLayoutSingle,
   IconLink,
   IconUnlink,
@@ -31,9 +39,14 @@ import { BottomDock } from "./BottomDock";
 import { ReplayBar } from "./ReplayBar";
 import {
   KLineChartStage,
+  type AlertChartOverlayData,
+  type BacktestChartOverlayData,
   type KLineChartHandle,
+  type PaperChartOverlayData,
 } from "@/components/chart/KLineChartStage";
+import type { BacktestPublishedOverlay } from "@/components/panels/BacktestPanel";
 import { WatchlistAndDetails } from "@/components/panels/WatchlistAndDetails";
+import { AlertsPanel } from "@/components/panels/AlertsPanel";
 import { DataWindowAndTree } from "@/components/panels/DataWindowAndTree";
 import { NewsFlowPanel } from "@/components/panels/NewsFlowPanel";
 import { EconomicCalendarPanel } from "@/components/panels/EconomicCalendarPanel";
@@ -47,6 +60,40 @@ import {
   usePaperTrading,
 } from "@/lib/paper-trading-store";
 import type { PaperMarketSnapshot } from "@/lib/paper-trading";
+import { AlertsProvider, useAlerts } from "@/lib/alerts-store";
+import {
+  isPriceAlertCondition,
+  type AlertEvaluationFeed,
+} from "@/lib/local-alerts";
+import {
+  addSymbolToWatchlistGroup,
+  buildDefaultWatchlistGroups,
+  createDefaultWatchlistGroupsStore,
+  createWatchlistGroup,
+  deleteWatchlistGroup,
+  loadWatchlistGroupsStore,
+  removeSymbolFromWatchlistGroup,
+  renameWatchlistGroup,
+  reorderSymbolInWatchlistGroups,
+  reorderWatchlistGroups,
+  saveWatchlistGroupsStore,
+  toggleWatchlistGroupCollapsed,
+  WATCHLIST_GROUPS_STORAGE_KEY,
+} from "@/lib/watchlist-groups";
+import {
+  buildNewWorkspaceTemplate,
+  createEmptyWorkspaceTemplatesStore,
+  loadWorkspaceTemplatesStore,
+  overwriteWorkspaceTemplate,
+  parseImportedTemplatesJson,
+  sanitizeFilenameSegment,
+  saveWorkspaceTemplatesStore,
+  serializeBundleTemplatesExport,
+  serializeSingleTemplateExport,
+  triggerJsonDownload,
+  WORKSPACE_TEMPLATES_STORAGE_KEY,
+  type WorkspaceTemplateSnapshotInput,
+} from "@/lib/workspace-templates";
 import {
   deriveQuoteFromBars,
   formatBarTimestamp,
@@ -60,8 +107,7 @@ import {
   PREFERENCES_STORAGE_KEY,
 } from "@/lib/preferences";
 
-const ALL_PANE_IDS = ["pane-1", "pane-2", "pane-3", "pane-4"] as const;
-type PaneId = (typeof ALL_PANE_IDS)[number];
+const ALL_PANE_IDS: readonly PaneId[] = ["pane-1", "pane-2", "pane-3", "pane-4"];
 
 const PANE_LABELS: Record<PaneId, string> = {
   "pane-1": "#1",
@@ -78,6 +124,7 @@ interface ChartPaneState {
   chartType: ChartType;
   activeIndicators: IndicatorId[];
   drawings: DrawnOverlayRecord[];
+  pendingRestoreDrawings: TemplateDrawing[] | null;
   links: PaneLinkOverrides;
   hoveredBar: NormalizedBar | null;
   hoveredPrevClose: number | null;
@@ -106,6 +153,7 @@ function createInitialPanes(
     chartType: "candle_solid",
     activeIndicators: ["MA", "VOL"],
     drawings: [],
+    pendingRestoreDrawings: null,
     links: { symbol: true, interval: true, crosshair: true },
     hoveredBar: lastBar,
     hoveredPrevClose: prevClose,
@@ -163,12 +211,27 @@ function pickNextWatchlistSymbols(
 
 export function TerminalWorkspace(props: TerminalWorkspaceProps) {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [alertToasts, setAlertToasts] = useState<AlertTriggerEvent[]>([]);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     window.setTimeout(() => {
       setToastMsg((prev) => (prev === msg ? null : prev));
     }, 2600);
+  }, []);
+
+  const pushAlertToasts = useCallback((events: AlertTriggerEvent[]) => {
+    if (events.length === 0) return;
+    setAlertToasts((prev) => [...events, ...prev].slice(0, 4));
+    for (const ev of events) {
+      window.setTimeout(() => {
+        setAlertToasts((prev) => prev.filter((item) => item.id !== ev.id));
+      }, 9000);
+    }
+  }, []);
+
+  const dismissAlertToast = useCallback((id: string) => {
+    setAlertToasts((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
   return (
@@ -189,11 +252,15 @@ export function TerminalWorkspace(props: TerminalWorkspaceProps) {
           }
         }}
       >
-        <TerminalWorkspaceInner
-          {...props}
-          toastMsg={toastMsg}
-          showToast={showToast}
-        />
+        <AlertsProvider onAlertsTriggered={pushAlertToasts}>
+          <TerminalWorkspaceInner
+            {...props}
+            toastMsg={toastMsg}
+            showToast={showToast}
+            alertToasts={alertToasts}
+            dismissAlertToast={dismissAlertToast}
+          />
+        </AlertsProvider>
       </PaperTradingProvider>
     </ReplayProvider>
   );
@@ -202,6 +269,8 @@ export function TerminalWorkspace(props: TerminalWorkspaceProps) {
 interface TerminalWorkspaceInnerProps extends TerminalWorkspaceProps {
   toastMsg: string | null;
   showToast: (msg: string) => void;
+  alertToasts: AlertTriggerEvent[];
+  dismissAlertToast: (id: string) => void;
 }
 
 function TerminalWorkspaceInner({
@@ -210,6 +279,8 @@ function TerminalWorkspaceInner({
   envStatus,
   toastMsg,
   showToast,
+  alertToasts,
+  dismissAlertToast,
 }: TerminalWorkspaceInnerProps) {
   const chartRefs = useRef<Record<PaneId, KLineChartHandle | null>>({
     "pane-1": null,
@@ -238,9 +309,20 @@ function TerminalWorkspaceInner({
     timestamp: number;
   } | null>(null);
 
-  // Watchlist State
+  // Watchlist State & Custom Watchlist Groups (B1)
   const [watchlist, setWatchlist] =
     useState<WatchlistSummaryItem[]>(initialWatchlist);
+  const [watchlistGroups, setWatchlistGroups] = useState<WatchlistGroup[]>(() =>
+    buildDefaultWatchlistGroups(initialWatchlist)
+  );
+  const [searchTargetGroupId, setSearchTargetGroupId] = useState<string | null>(
+    null
+  );
+
+  // Workspace Templates State (B2)
+  const [templatesStore, setTemplatesStore] = useState<WorkspaceTemplatesStore>(
+    () => createEmptyWorkspaceTemplatesStore()
+  );
 
   // Visual & Preference State (Dark + Intl Green-Up/Red-Down Default; hydrated from localStorage)
   const [theme, setTheme] = useState<ThemeMode>("dark");
@@ -260,9 +342,18 @@ function TerminalWorkspaceInner({
   const [indicatorOpen, setIndicatorOpen] = useState(false);
   const [screenerOpen, setScreenerOpen] = useState(false);
 
-  // Replay & Local Paper Trading Stores
+  // Batch 4C: Educational Backtest Main-Chart Marker Overlay State
+  const [backtestOverlayState, setBacktestOverlayState] =
+    useState<BacktestPublishedOverlay | null>(null);
+  const [showBacktestMarkers, setShowBacktestMarkers] = useState(true);
+  const handleToggleBacktestMarkers = useCallback(() => {
+    setShowBacktestMarkers((v) => !v);
+  }, []);
+
+  // Replay, Local Paper Trading & Local Alerts Stores
   const replay = useReplay();
   const paper = usePaperTrading();
+  const alerts = useAlerts();
 
   const visiblePaneIds = useMemo(
     () => computeVisiblePaneIds(layout, activePaneId),
@@ -284,17 +375,31 @@ function TerminalWorkspaceInner({
     setDefaultMarket(loaded.defaultMarket);
     applyDocumentPreferences(loaded);
 
+    // Hydrate B1 custom watchlist groups & B2 workspace templates
+    setWatchlistGroups(
+      loadWatchlistGroupsStore(initialWatchlist, loaded.defaultMarket).groups
+    );
+    setTemplatesStore(loadWorkspaceTemplatesStore());
+
     const onStorage = (e: StorageEvent) => {
-      if (e.key !== PREFERENCES_STORAGE_KEY) return;
-      const updated = loadUserPreferences();
-      setTheme(updated.theme);
-      setColorScheme(updated.colorScheme);
-      setDefaultMarket(updated.defaultMarket);
-      applyDocumentPreferences(updated);
+      if (e.key === PREFERENCES_STORAGE_KEY) {
+        const updated = loadUserPreferences();
+        setTheme(updated.theme);
+        setColorScheme(updated.colorScheme);
+        setDefaultMarket(updated.defaultMarket);
+        applyDocumentPreferences(updated);
+      } else if (e.key === WATCHLIST_GROUPS_STORAGE_KEY) {
+        const prefs = loadUserPreferences();
+        setWatchlistGroups(
+          loadWatchlistGroupsStore(initialWatchlist, prefs.defaultMarket).groups
+        );
+      } else if (e.key === WORKSPACE_TEMPLATES_STORAGE_KEY) {
+        setTemplatesStore(loadWorkspaceTemplatesStore());
+      }
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, []);
+  }, [initialWatchlist]);
 
   // Keep replay store synced if target pane's bars/symbol/interval update
   const replayTargetPane = panes[replay.state.targetPaneId as PaneId] ?? activePane;
@@ -731,6 +836,381 @@ function TerminalWorkspaceInner({
     setRightTab((prev) => (prev === tab ? null : tab));
   }, []);
 
+  // === B1: Custom Watchlist Group Handlers ===
+  const updateWatchlistGroups = useCallback(
+    (updater: (prev: WatchlistGroup[]) => WatchlistGroup[]) => {
+      setWatchlistGroups((prev) => {
+        const nextGroups = updater(prev);
+        saveWatchlistGroupsStore({
+          version: 1,
+          groups: nextGroups,
+          updatedAt: new Date().toISOString(),
+        });
+        return nextGroups;
+      });
+    },
+    []
+  );
+
+  const handleCreateWatchlistGroup = useCallback(
+    (name: string, initialSymbolIds: string[] = []) => {
+      updateWatchlistGroups((prev) =>
+        createWatchlistGroup(prev, name, initialSymbolIds)
+      );
+      showToast(`已创建自选分组「${name.trim()}」`);
+    },
+    [updateWatchlistGroups, showToast]
+  );
+
+  const handleRenameWatchlistGroup = useCallback(
+    (groupId: string, nextName: string) => {
+      updateWatchlistGroups((prev) =>
+        renameWatchlistGroup(prev, groupId, nextName)
+      );
+      showToast(`分组已重命名为「${nextName.trim()}」`);
+    },
+    [updateWatchlistGroups, showToast]
+  );
+
+  const handleDeleteWatchlistGroup = useCallback(
+    (groupId: string) => {
+      updateWatchlistGroups((prev) => deleteWatchlistGroup(prev, groupId));
+      showToast("已删除自选分组");
+    },
+    [updateWatchlistGroups, showToast]
+  );
+
+  const handleToggleWatchlistGroupCollapsed = useCallback(
+    (groupId: string) => {
+      updateWatchlistGroups((prev) =>
+        toggleWatchlistGroupCollapsed(prev, groupId)
+      );
+    },
+    [updateWatchlistGroups]
+  );
+
+  const handleReorderWatchlistGroups = useCallback(
+    (
+      sourceGroupId: string,
+      targetGroupId: string,
+      position: "before" | "after"
+    ) => {
+      updateWatchlistGroups((prev) =>
+        reorderWatchlistGroups(prev, sourceGroupId, targetGroupId, position)
+      );
+    },
+    [updateWatchlistGroups]
+  );
+
+  const handleReorderSymbolInGroups = useCallback(
+    (params: {
+      sourceGroupId: string;
+      symbolId: string;
+      targetGroupId: string;
+      targetSymbolId?: string | null;
+      position?: "before" | "after";
+    }) => {
+      updateWatchlistGroups((prev) =>
+        reorderSymbolInWatchlistGroups(prev, params)
+      );
+    },
+    [updateWatchlistGroups]
+  );
+
+  const handleAddSymbolToGroup = useCallback(
+    (groupId: string, symbolId: string) => {
+      updateWatchlistGroups((prev) =>
+        addSymbolToWatchlistGroup(prev, groupId, symbolId)
+      );
+    },
+    [updateWatchlistGroups]
+  );
+
+  const handleRemoveSymbolFromGroup = useCallback(
+    (groupId: string, symbolId: string) => {
+      updateWatchlistGroups((prev) =>
+        removeSymbolFromWatchlistGroup(prev, groupId, symbolId)
+      );
+    },
+    [updateWatchlistGroups]
+  );
+
+  const handleToggleSymbolInGroup = useCallback(
+    (groupId: string, symbolId: string) => {
+      updateWatchlistGroups((prev) => {
+        const target = prev.find((g) => g.id === groupId);
+        if (!target) return prev;
+        if (target.symbolIds.includes(symbolId)) {
+          return removeSymbolFromWatchlistGroup(prev, groupId, symbolId);
+        }
+        return addSymbolToWatchlistGroup(prev, groupId, symbolId);
+      });
+    },
+    [updateWatchlistGroups]
+  );
+
+  const handleResetDefaultWatchlistGroups = useCallback(() => {
+    const store = createDefaultWatchlistGroupsStore(watchlist, defaultMarket);
+    setWatchlistGroups(store.groups);
+    saveWatchlistGroupsStore(store);
+    showToast("已恢复默认 4 个市场分组");
+  }, [watchlist, defaultMarket, showToast]);
+
+  // === B2: Workspace Templates Handlers ===
+  const updateTemplatesStore = useCallback(
+    (updater: (prev: WorkspaceTemplatesStore) => WorkspaceTemplatesStore) => {
+      setTemplatesStore((prev) => {
+        const next = updater(prev);
+        const withTs: WorkspaceTemplatesStore = {
+          ...next,
+          updatedAt: new Date().toISOString(),
+        };
+        saveWorkspaceTemplatesStore(withTs);
+        return withTs;
+      });
+    },
+    []
+  );
+
+  const captureCurrentWorkspaceSnapshot =
+    useCallback((): WorkspaceTemplateSnapshotInput => {
+      const currentPanes = panesRef.current;
+      return {
+        layout,
+        activePaneId,
+        syncConfig: { ...syncConfig },
+        panes: ALL_PANE_IDS.map((pid) => {
+          const pane = currentPanes[pid];
+          const exportedDrawings =
+            chartRefs.current[pid]?.exportUserDrawings(pane.drawings) ?? [];
+          return {
+            paneId: pid,
+            initialized: pane.initialized,
+            symbolId: pane.data.symbol.id,
+            interval: pane.data.interval,
+            chartType: pane.chartType,
+            activeIndicators: [...pane.activeIndicators],
+            drawings: exportedDrawings,
+            links: { ...pane.links },
+          };
+        }),
+      };
+    }, [layout, activePaneId, syncConfig]);
+
+  const handleSaveNewTemplate = useCallback(
+    (name: string) => {
+      const snap = captureCurrentWorkspaceSnapshot();
+      const created = buildNewWorkspaceTemplate(name, snap);
+      updateTemplatesStore((prev) => ({
+        ...prev,
+        activeTemplateId: created.id,
+        templates: [created, ...prev.templates],
+      }));
+      showToast(`已保存工作区模板「${created.name}」`);
+    },
+    [captureCurrentWorkspaceSnapshot, updateTemplatesStore, showToast]
+  );
+
+  const handleOverwriteTemplate = useCallback(
+    (templateId: string) => {
+      const snap = captureCurrentWorkspaceSnapshot();
+      let updatedName = "";
+      updateTemplatesStore((prev) => ({
+        ...prev,
+        activeTemplateId: templateId,
+        templates: prev.templates.map((t) => {
+          if (t.id !== templateId) return t;
+          updatedName = t.name;
+          return overwriteWorkspaceTemplate(t, snap);
+        }),
+      }));
+      if (updatedName) {
+        showToast(`已用当前工作区覆盖模板「${updatedName}」`);
+      }
+    },
+    [captureCurrentWorkspaceSnapshot, updateTemplatesStore, showToast]
+  );
+
+  const handleRenameTemplate = useCallback(
+    (templateId: string, nextName: string) => {
+      const trimmed = nextName.trim().slice(0, 60);
+      if (!trimmed) return;
+      updateTemplatesStore((prev) => ({
+        ...prev,
+        templates: prev.templates.map((t) =>
+          t.id === templateId
+            ? { ...t, name: trimmed, updatedAt: new Date().toISOString() }
+            : t
+        ),
+      }));
+      showToast(`模板已重命名为「${trimmed}」`);
+    },
+    [updateTemplatesStore, showToast]
+  );
+
+  const handleDeleteTemplate = useCallback(
+    (templateId: string) => {
+      updateTemplatesStore((prev) => ({
+        ...prev,
+        activeTemplateId:
+          prev.activeTemplateId === templateId ? null : prev.activeTemplateId,
+        templates: prev.templates.filter((t) => t.id !== templateId),
+      }));
+      showToast("已删除工作区模板");
+    },
+    [updateTemplatesStore, showToast]
+  );
+
+  const handleApplyTemplate = useCallback(
+    (template: WorkspaceTemplate) => {
+      if (replay.state.active) {
+        replay.exitReplay();
+      }
+      chartRefs.current[activePaneId]?.cancelPendingDrawing();
+      setActiveTool("cursor");
+      setSyncedCrosshair(null);
+
+      const knownIds = new Set(watchlist.map((w) => w.symbol.id));
+      const fallbackSymbolId =
+        watchlist[0]?.symbol.id ?? initialData.symbol.id;
+      const paneSnapMap = new Map(template.panes.map((p) => [p.paneId, p]));
+      const currentPanes = panesRef.current;
+
+      const toFetch: Array<{
+        paneId: PaneId;
+        symbolId: string;
+        interval: Interval;
+      }> = [];
+
+      setPanes((prev) => {
+        const next = { ...prev };
+        for (const pid of ALL_PANE_IDS) {
+          const snap = paneSnapMap.get(pid);
+          const cur = prev[pid];
+          if (!snap) continue;
+          const resolvedSymId = knownIds.has(snap.symbolId)
+            ? snap.symbolId
+            : fallbackSymbolId;
+          const targetMeta = watchlist.find(
+            (w) => w.symbol.id === resolvedSymId
+          )?.symbol;
+          const resolvedInterval: Interval =
+            targetMeta && targetMeta.supportedIntervals.includes(snap.interval)
+              ? snap.interval
+              : "1D";
+
+          const needsFetch =
+            snap.initialized &&
+            (!cur.initialized ||
+              cur.data.symbol.id !== resolvedSymId ||
+              cur.data.interval !== resolvedInterval);
+
+          if (needsFetch) {
+            toFetch.push({
+              paneId: pid,
+              symbolId: resolvedSymId,
+              interval: resolvedInterval,
+            });
+          } else if (snap.drawings.length === 0) {
+            chartRefs.current[pid]?.clearAllOverlays();
+          }
+
+          next[pid] = {
+            ...cur,
+            initialized: snap.initialized,
+            loading: needsFetch ? true : cur.loading,
+            chartType: snap.chartType,
+            activeIndicators: [...snap.activeIndicators],
+            links: { ...snap.links },
+            drawings: snap.drawings.length === 0 ? [] : cur.drawings,
+            pendingRestoreDrawings:
+              snap.drawings.length > 0 ? [...snap.drawings] : null,
+          };
+        }
+        return next;
+      });
+
+      setLayout(template.layout);
+      setActivePaneId(template.activePaneId);
+      setSyncConfig({ ...template.syncConfig });
+      updateTemplatesStore((prev) => ({
+        ...prev,
+        activeTemplateId: template.id,
+      }));
+
+      for (const req of toFetch) {
+        const cur = currentPanes[req.paneId];
+        void fetchBarsForPane(
+          req.paneId,
+          req.symbolId,
+          req.interval,
+          cur.data.symbol.id !== req.symbolId
+        );
+      }
+
+      showToast(`已切换应用模板「${template.name}」`);
+    },
+    [
+      replay,
+      activePaneId,
+      watchlist,
+      initialData.symbol.id,
+      updateTemplatesStore,
+      fetchBarsForPane,
+      showToast,
+    ]
+  );
+
+  const handleExportSingleTemplate = useCallback(
+    (template: WorkspaceTemplate) => {
+      const json = serializeSingleTemplateExport(template);
+      const slug = sanitizeFilenameSegment(template.name);
+      triggerJsonDownload(`trade-buddy-template-${slug}.json`, json);
+      showToast(`已导出模板「${template.name}」JSON`);
+    },
+    [showToast]
+  );
+
+  const handleExportAllTemplates = useCallback(() => {
+    if (templatesStore.templates.length === 0) return;
+    const json = serializeBundleTemplatesExport(templatesStore.templates);
+    triggerJsonDownload("trade-buddy-templates-all.json", json);
+    showToast(`已导出全部 ${templatesStore.templates.length} 个模板 JSON`);
+  }, [templatesStore.templates, showToast]);
+
+  const handleImportTemplatesJson = useCallback(
+    (rawText: string): { ok: boolean; error?: string } => {
+      const knownIds = new Set(watchlist.map((w) => w.symbol.id));
+      const res = parseImportedTemplatesJson(rawText, knownIds);
+      if (!res.ok) {
+        return { ok: false, error: res.error };
+      }
+      updateTemplatesStore((prev) => ({
+        ...prev,
+        templates: [...res.templates, ...prev.templates],
+      }));
+      const warnSuffix =
+        res.warnings.length > 0 ? `（提示：${res.warnings[0]}）` : "";
+      showToast(`成功导入 ${res.templates.length} 个工作区模板${warnSuffix}`);
+      return { ok: true };
+    },
+    [watchlist, updateTemplatesStore, showToast]
+  );
+
+  const handlePaneDrawingsRestored = useCallback(
+    (paneId: PaneId, restoredRecords: DrawnOverlayRecord[]) => {
+      setPanes((prev) => ({
+        ...prev,
+        [paneId]: {
+          ...prev[paneId],
+          drawings: restoredRecords,
+          pendingRestoreDrawings: null,
+        },
+      }));
+    },
+    []
+  );
+
   // Replay toggle from TopBar
   const handleToggleReplay = useCallback(() => {
     if (replay.state.active) {
@@ -1021,16 +1501,144 @@ function TerminalWorkspaceInner({
       prevReplayCursorRef.current = null;
     }
 
-    paper.processMarketSnapshots(snapshotsToEval);
+    const sampleLabel =
+      replay.state.active && replay.state.currentTimestamp !== null
+        ? `回放 ${formatBarTimestamp(
+            replay.state.currentTimestamp,
+            replay.state.interval
+          )}`
+        : undefined;
+
+    paper.processMarketSnapshots(
+      snapshotsToEval,
+      markPriceBySymbol,
+      sampleLabel
+    );
   }, [
     paper.hydrated,
     paper.processMarketSnapshots,
     paperSnapshotsBySymbol,
+    markPriceBySymbol,
     replay.state.active,
     replay.state.pickStartMode,
     replay.state.targetPaneId,
     replay.state.currentIndex,
+    replay.state.currentTimestamp,
+    replay.state.interval,
   ]);
+
+  // === B3: Local Alerts Evaluation Feeds & Auto/Manual Checks ===
+  const alertEvaluationFeeds = useMemo<AlertEvaluationFeed[]>(() => {
+    const feeds: AlertEvaluationFeed[] = [];
+    const seenExact = new Set<string>();
+
+    // 1. Visible panes (active pane first so its loaded bars/quote take precedence)
+    const orderedPanes: PaneId[] = [
+      activePaneId,
+      ...visiblePaneIds.filter((id) => id !== activePaneId),
+    ];
+
+    for (const pid of orderedPanes) {
+      const pane = panes[pid];
+      const info = visibleBarsByPane[pid];
+      const exactKey = `${pane.data.symbol.id}::${pane.data.interval}`;
+      if (seenExact.has(exactKey)) continue;
+      seenExact.add(exactKey);
+
+      const quote = info.isReplaySliced
+        ? deriveQuoteFromBars(pane.data.quote, info.bars, pane.data.interval)
+        : pane.data.quote;
+
+      feeds.push({
+        symbolId: pane.data.symbol.id,
+        interval: pane.data.interval,
+        bars: info.bars,
+        quote,
+        isReplay: info.isReplaySliced,
+      });
+    }
+
+    // 2. Watchlist summary quotes (enables price/change_pct checks even for symbols not currently open)
+    for (const item of watchlist) {
+      const key = `${item.symbol.id}::1D`;
+      if (seenExact.has(key)) continue;
+      feeds.push({
+        symbolId: item.symbol.id,
+        interval: "1D",
+        bars: [],
+        quote: item.quote,
+        isReplay: false,
+      });
+    }
+
+    return feeds;
+  }, [activePaneId, visiblePaneIds, panes, visibleBarsByPane, watchlist]);
+
+  // Auto-evaluate local alerts whenever bars/quotes/replay step update (only while page is open)
+  useEffect(() => {
+    if (!alerts.hydrated) return;
+    if (replay.state.active && replay.state.pickStartMode) return;
+    if (!alerts.rules.some((r) => r.enabled)) return;
+    alerts.evaluateFeeds(alertEvaluationFeeds);
+  }, [
+    alerts.hydrated,
+    alerts.rules,
+    alerts.settings.triggerInReplayMode,
+    alerts.evaluateFeeds,
+    alertEvaluationFeeds,
+    replay.state.active,
+    replay.state.pickStartMode,
+  ]);
+
+  // Manual check: also fetches /api/bars on demand for enabled rules whose (symbol, interval) isn't loaded on a pane
+  const handleManualCheckAlerts = useCallback(async () => {
+    const feeds: AlertEvaluationFeed[] = [...alertEvaluationFeeds];
+    const loadedExactWithBars = new Set(
+      feeds.filter((f) => f.bars.length > 0).map((f) => `${f.symbolId}::${f.interval}`)
+    );
+
+    const missingKeys = new Map<string, { symbolId: string; interval: Interval }>();
+    for (const rule of alerts.rules) {
+      if (!rule.enabled) continue;
+      const key = `${rule.symbolId}::${rule.interval}`;
+      if (!loadedExactWithBars.has(key) && !missingKeys.has(key)) {
+        missingKeys.set(key, { symbolId: rule.symbolId, interval: rule.interval });
+      }
+    }
+
+    if (missingKeys.size > 0) {
+      await Promise.all(
+        Array.from(missingKeys.values()).map(async ({ symbolId, interval }) => {
+          try {
+            const res = await fetch(
+              `/api/bars?symbol=${encodeURIComponent(
+                symbolId
+              )}&interval=${encodeURIComponent(interval)}`
+            );
+            if (!res.ok) return;
+            const data = (await res.json()) as BarsResponse;
+            feeds.unshift({
+              symbolId: data.symbol.id,
+              interval: data.interval,
+              bars: data.bars,
+              quote: data.quote,
+              isReplay: false,
+            });
+          } catch {
+            // Keep existing quote-only feed on fetch failure
+          }
+        })
+      );
+    }
+
+    const res = alerts.evaluateFeeds(feeds, { sourceMode: "manual_check" });
+    return {
+      triggeredCount: res.triggeredEvents.length,
+      checkedCount: res.checkedCount,
+      skippedReplayCount: res.skippedReplayCount,
+      detailsByRuleId: res.detailsByRuleId,
+    };
+  }, [alertEvaluationFeeds, alerts]);
 
   // Desktop keyboard shortcuts
   useEffect(() => {
@@ -1161,7 +1769,20 @@ function TerminalWorkspaceInner({
         syncConfig={syncConfig}
         replayActive={replay.state.active}
         activePaneBadge={isMultiChart ? PANE_LABELS[activePaneId] : null}
+        templates={templatesStore.templates}
+        activeTemplateId={templatesStore.activeTemplateId}
+        alertUnreadCount={alerts.unreadCount}
+        onSaveNewTemplate={handleSaveNewTemplate}
+        onApplyTemplate={handleApplyTemplate}
+        onOverwriteTemplate={handleOverwriteTemplate}
+        onRenameTemplate={handleRenameTemplate}
+        onDeleteTemplate={handleDeleteTemplate}
+        onExportSingleTemplate={handleExportSingleTemplate}
+        onExportAllTemplates={handleExportAllTemplates}
+        onImportTemplatesJson={handleImportTemplatesJson}
+        onOpenAlerts={() => setRightTab("alerts")}
         onOpenSearch={() => {
+          setSearchTargetGroupId(null);
           setSearchInitialQuery("");
           setSearchOpen(true);
         }}
@@ -1220,6 +1841,80 @@ function TerminalWorkspaceInner({
                 syncedCrosshair.sourcePaneId !== pid
                   ? syncedCrosshair.timestamp
                   : null;
+
+              // Build per-pane paper trading main-chart overlay data (scoped to this pane's symbol & replay progress)
+              let panePaperOverlay: PaperChartOverlayData | null = null;
+              if (paper.account) {
+                const symId = pane.data.symbol.id;
+                const pos =
+                  paper.account.positions.find((p) => p.symbolId === symId) ??
+                  null;
+                const openOrders = paper.account.orders.filter(
+                  (o) =>
+                    o.status === "open" &&
+                    o.symbolId === symId &&
+                    o.limitPrice !== undefined
+                );
+                let symFills = paper.account.fills.filter(
+                  (f) => f.symbolId === symId
+                );
+
+                // During replay on this pane, strictly hide fills later than replay progress
+                const replayMaxTs = barInfo.isReplaySliced
+                  ? barInfo.bars[barInfo.bars.length - 1]?.timestamp ?? null
+                  : isReplayTarget && replay.state.pickStartMode
+                  ? replay.state.currentTimestamp
+                  : null;
+
+                if (replayMaxTs !== null) {
+                  symFills = symFills.filter((f) => {
+                    const effectiveTs = f.barTimestamp ?? Date.parse(f.filledAt);
+                    return (
+                      Number.isFinite(effectiveTs) && effectiveTs <= replayMaxTs
+                    );
+                  });
+                }
+
+                panePaperOverlay = {
+                  enabled: paper.account.settings.showChartMarkers,
+                  position: pos,
+                  openOrders,
+                  fills: symFills,
+                };
+              }
+
+              const paneAlertOverlay: AlertChartOverlayData = {
+                enabled: alerts.settings.showChartLines,
+                priceAlerts: alerts.rules.filter(
+                  (r) =>
+                    r.symbolId === pane.data.symbol.id &&
+                    isPriceAlertCondition(r.condition)
+                ),
+              };
+
+              let paneBacktestOverlay: BacktestChartOverlayData | null = null;
+              if (
+                backtestOverlayState &&
+                backtestOverlayState.symbolId === pane.data.symbol.id &&
+                backtestOverlayState.interval === pane.data.interval
+              ) {
+                const replayCutoffTs = barInfo.isReplaySliced
+                  ? barInfo.bars[barInfo.bars.length - 1]?.timestamp ?? null
+                  : isReplayTarget && replay.state.pickStartMode
+                  ? replay.state.currentTimestamp
+                  : null;
+                const scopedTrades =
+                  replayCutoffTs !== null
+                    ? backtestOverlayState.trades.filter(
+                        (t) => t.timestamp <= replayCutoffTs
+                      )
+                    : backtestOverlayState.trades;
+                paneBacktestOverlay = {
+                  enabled: showBacktestMarkers,
+                  strategyLabel: backtestOverlayState.strategyLabel,
+                  trades: scopedTrades,
+                };
+              }
 
               return (
                 <div
@@ -1368,6 +2063,20 @@ function TerminalWorkspaceInner({
                       isReplayTarget && replay.state.pickStartMode
                     }
                     replayBadge={barInfo.replayBadge}
+                    paperOverlay={panePaperOverlay}
+                    onTogglePaperOverlay={paper.toggleChartMarkers}
+                    alertOverlay={paneAlertOverlay}
+                    onToggleAlertOverlay={() =>
+                      alerts.updateSettings({
+                        showChartLines: !alerts.settings.showChartLines,
+                      })
+                    }
+                    backtestOverlay={paneBacktestOverlay}
+                    onToggleBacktestOverlay={handleToggleBacktestMarkers}
+                    pendingRestoreDrawings={pane.pendingRestoreDrawings}
+                    onDrawingsRestored={(restored) =>
+                      handlePaneDrawingsRestored(pid, restored)
+                    }
                     onChangeAnnotationText={setAnnotationText}
                     onCancelDrawingTool={handleCancelDrawingTool}
                     onCrosshairChange={(bar, prevClose) => {
@@ -1431,14 +2140,21 @@ function TerminalWorkspaceInner({
             activePaneSwitch={activePaneSwitch}
           />
 
-          {/* Zone 5: Bottom Collapsible Paper Trading / Research Notes / Provenance Dock */}
+          {/* Zone 5: Bottom Collapsible Paper Trading / Backtest / Research Notes / Provenance Dock */}
           <BottomDock
             symbol={activePane.data.symbol}
+            interval={activePane.data.interval}
             provenance={activePane.data.provenance}
+            fullBars={activePane.data.bars}
+            visibleBars={visibleBarsByPane[activePaneId].bars}
+            isReplayActive={visibleBarsByPane[activePaneId].isReplaySliced}
             envStatus={envStatus}
             activePaperSnapshot={activePaperSnapshot}
             paperSnapshotsBySymbol={paperSnapshotsBySymbol}
             markPriceBySymbol={markPriceBySymbol}
+            showBacktestMarkers={showBacktestMarkers}
+            onToggleBacktestMarkers={handleToggleBacktestMarkers}
+            onPublishBacktestOverlay={setBacktestOverlayState}
             onSelectSymbol={handleSelectSymbol}
             onNotify={showToast}
           />
@@ -1450,12 +2166,40 @@ function TerminalWorkspaceInner({
             {rightTab === "watchlist" && (
               <WatchlistAndDetails
                 watchlist={watchlist}
+                groups={watchlistGroups}
                 activeSymbol={activePane.data.symbol}
                 activeQuote={activeDisplayQuote}
                 activeProvenance={activePane.data.provenance}
                 defaultMarket={defaultMarket}
                 onSelectSymbol={handleSelectSymbol}
+                onCreateGroup={handleCreateWatchlistGroup}
+                onRenameGroup={handleRenameWatchlistGroup}
+                onDeleteGroup={handleDeleteWatchlistGroup}
+                onToggleGroupCollapsed={handleToggleWatchlistGroupCollapsed}
+                onReorderGroups={handleReorderWatchlistGroups}
+                onReorderSymbol={handleReorderSymbolInGroups}
+                onAddSymbolToGroup={handleAddSymbolToGroup}
+                onRemoveSymbolFromGroup={handleRemoveSymbolFromGroup}
+                onResetDefaultGroups={handleResetDefaultWatchlistGroups}
+                onOpenSearchForGroup={(groupId) => {
+                  setSearchTargetGroupId(groupId);
+                  setSearchInitialQuery("");
+                  setSearchOpen(true);
+                }}
                 onOpenFundamentals={() => setRightTab("fundamentals")}
+                onOpenAlerts={() => setRightTab("alerts")}
+              />
+            )}
+
+            {rightTab === "alerts" && (
+              <AlertsPanel
+                activeSymbol={activePane.data.symbol}
+                activeInterval={activePane.data.interval}
+                activeQuote={activeDisplayQuote}
+                watchlist={watchlist}
+                onSelectSymbol={handleSelectSymbol}
+                onManualCheckAll={handleManualCheckAlerts}
+                onNotify={showToast}
               />
             )}
 
@@ -1497,6 +2241,8 @@ function TerminalWorkspaceInner({
         <RightIconRail
           activeTab={rightTab}
           onSelectTab={handleSelectRightTab}
+          alertUnreadCount={alerts.unreadCount}
+          activeAlertRuleCount={alerts.rules.filter((r) => r.enabled).length}
         />
       </div>
 
@@ -1506,8 +2252,14 @@ function TerminalWorkspaceInner({
         initialQuery={searchInitialQuery}
         items={watchlist}
         currentSymbolId={activePane.data.symbol.id}
+        watchlistGroups={watchlistGroups}
+        initialTargetGroupId={searchTargetGroupId}
+        onToggleSymbolInGroup={handleToggleSymbolInGroup}
         onSelect={handleSelectSymbol}
-        onClose={() => setSearchOpen(false)}
+        onClose={() => {
+          setSearchOpen(false);
+          setSearchTargetGroupId(null);
+        }}
       />
 
       <IndicatorModal
@@ -1524,6 +2276,69 @@ function TerminalWorkspaceInner({
         onSelectSymbol={handleSelectSymbol}
         onClose={() => setScreenerOpen(false)}
       />
+
+      {/* Local Alert In-Page Notification Toasts */}
+      {alertToasts.length > 0 && (
+        <div
+          aria-live="polite"
+          className="fixed right-14 top-12 z-50 flex w-[320px] flex-col gap-2"
+        >
+          {alertToasts.map((ev) => (
+            <div
+              key={ev.id}
+              className="tb-elevated rounded-md border p-2.5 shadow-2xl"
+              style={{ borderColor: "var(--status-delayed)" }}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <IconBell
+                    size={14}
+                    className="shrink-0 text-[var(--status-delayed)]"
+                  />
+                  <span className="truncate text-[12px] font-semibold tb-text-primary">
+                    本地提醒触发 · {ev.title}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => dismissAlertToast(ev.id)}
+                  className="tb-hover rounded p-0.5 tb-text-muted cursor-pointer"
+                >
+                  <IconClose size={12} />
+                </button>
+              </div>
+              <p className="mt-1 text-[11px] leading-snug tb-text-secondary">
+                {ev.message}
+              </p>
+              <div className="mt-2 flex items-center justify-between text-[10px]">
+                <span className="tb-text-muted">仅本页面打开时生效</span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleSelectSymbol(ev.symbolId);
+                      dismissAlertToast(ev.id);
+                    }}
+                    className="rounded bg-[var(--accent-soft)] px-2 py-0.5 font-medium text-[var(--accent-primary)] cursor-pointer"
+                  >
+                    看图
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRightTab("alerts");
+                      dismissAlertToast(ev.id);
+                    }}
+                    className="rounded border tb-border-subtle px-2 py-0.5 tb-text-primary tb-hover cursor-pointer"
+                  >
+                    通知中心
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Lightweight Toast */}
       {toastMsg && (

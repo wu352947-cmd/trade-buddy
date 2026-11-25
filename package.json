@@ -12,7 +12,8 @@
     "build": "npm --workspace=@trade-buddy/web run build",
     "start": "npm --workspace=@trade-buddy/web run start",
     "typecheck": "npm --workspace=@trade-buddy/web run typecheck",
-    "lint": "npm --workspace=@trade-buddy/web run lint"
+    "lint": "npm --workspace=@trade-buddy/web run lint",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.ts"
   },
   "engines": {
     "node": ">=20.0.0"

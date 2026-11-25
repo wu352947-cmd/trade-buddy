@@ -11,11 +11,14 @@ import type {
   LayoutSyncConfig,
   SymbolMeta,
   ThemeMode,
+  WorkspaceTemplate,
 } from "@trade-buddy/shared-types";
 import { INTERVAL_LABELS } from "@trade-buddy/shared-types";
+import { WorkspaceTemplateMenu } from "./WorkspaceTemplateMenu";
 import {
   IconAreaChart,
   IconBarsOHLC,
+  IconBell,
   IconCandles,
   IconChevronDown,
   IconHollowCandles,
@@ -97,6 +100,18 @@ interface TopBarProps {
   syncConfig: LayoutSyncConfig;
   replayActive: boolean;
   activePaneBadge?: string | null;
+  templates: WorkspaceTemplate[];
+  activeTemplateId: string | null;
+  alertUnreadCount?: number;
+  onSaveNewTemplate: (name: string) => void;
+  onApplyTemplate: (template: WorkspaceTemplate) => void;
+  onOverwriteTemplate: (templateId: string) => void;
+  onRenameTemplate: (templateId: string, nextName: string) => void;
+  onDeleteTemplate: (templateId: string) => void;
+  onExportSingleTemplate: (template: WorkspaceTemplate) => void;
+  onExportAllTemplates: () => void;
+  onImportTemplatesJson: (rawText: string) => { ok: boolean; error?: string };
+  onOpenAlerts: () => void;
   onOpenSearch: () => void;
   onChangeInterval: (interval: Interval) => void;
   onChangeChartType: (chartType: ChartType) => void;
@@ -120,6 +135,18 @@ export function TopBar({
   syncConfig,
   replayActive,
   activePaneBadge,
+  templates,
+  activeTemplateId,
+  alertUnreadCount = 0,
+  onSaveNewTemplate,
+  onApplyTemplate,
+  onOverwriteTemplate,
+  onRenameTemplate,
+  onDeleteTemplate,
+  onExportSingleTemplate,
+  onExportAllTemplates,
+  onImportTemplatesJson,
+  onOpenAlerts,
   onOpenSearch,
   onChangeInterval,
   onChangeChartType,
@@ -335,10 +362,40 @@ export function TopBar({
           <IconScreener size={14} className="text-[var(--accent-primary)]" />
           <span>筛选器</span>
         </button>
+
+        {/* Local Alerts Quick Trigger */}
+        <button
+          type="button"
+          onClick={onOpenAlerts}
+          title="打开本地提醒面板（仅本页面打开时生效）"
+          className="tb-hover relative flex items-center gap-1 rounded px-2 py-1 font-medium tb-text-primary transition-colors cursor-pointer"
+        >
+          <IconBell size={14} className="text-[var(--status-delayed)]" />
+          <span className="hidden xl:inline">提醒</span>
+          {alertUnreadCount > 0 && (
+            <span className="rounded-full bg-[#F2485B] px-1 text-[9px] font-bold text-white tabular-nums">
+              {alertUnreadCount > 9 ? "9+" : alertUnreadCount}
+            </span>
+          )}
+        </button>
       </div>
 
-      {/* Right group: Layout & Sync + Color Scheme + Theme + Research Compliance Badge */}
+      {/* Right group: Layout & Sync + Workspace Templates + Color Scheme + Theme + Settings */}
       <div className="flex items-center gap-1.5 shrink-0">
+        {/* Workspace Templates Menu */}
+        <WorkspaceTemplateMenu
+          templates={templates}
+          activeTemplateId={activeTemplateId}
+          onSaveNew={onSaveNewTemplate}
+          onApplyTemplate={onApplyTemplate}
+          onOverwriteTemplate={onOverwriteTemplate}
+          onRenameTemplate={onRenameTemplate}
+          onDeleteTemplate={onDeleteTemplate}
+          onExportSingle={onExportSingleTemplate}
+          onExportAll={onExportAllTemplates}
+          onImportJsonText={onImportTemplatesJson}
+        />
+
         {/* Multi-Chart Layout & Link Menu */}
         <div className="relative" ref={layoutMenuRef}>
           <button

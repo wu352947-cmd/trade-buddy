@@ -16,6 +16,7 @@ import type {
   Styles,
 } from "klinecharts";
 import type {
+  BacktestTrade,
   ChartType,
   ColorScheme,
   DataProvenance,
@@ -23,8 +24,13 @@ import type {
   DrawnOverlayRecord,
   IndicatorId,
   Interval,
+  LocalAlertRule,
   NormalizedBar,
+  PaperFill,
+  PaperOrder,
+  PaperPosition,
   SymbolMeta,
+  TemplateDrawing,
   ThemeMode,
 } from "@trade-buddy/shared-types";
 import { getChartPalette, IconClose } from "@trade-buddy/ui-tokens";
@@ -42,7 +48,27 @@ export interface KLineChartHandle {
   cancelPendingDrawing: () => void;
   removeOverlayById: (id: string) => void;
   clearAllOverlays: () => void;
+  exportUserDrawings: (records: DrawnOverlayRecord[]) => TemplateDrawing[];
+  restoreUserDrawings: (drawings: TemplateDrawing[]) => DrawnOverlayRecord[];
   fitRange: (barCount: number | "all") => void;
+}
+
+export interface PaperChartOverlayData {
+  enabled: boolean;
+  position: PaperPosition | null;
+  openOrders: PaperOrder[];
+  fills: PaperFill[];
+}
+
+export interface AlertChartOverlayData {
+  enabled: boolean;
+  priceAlerts: LocalAlertRule[];
+}
+
+export interface BacktestChartOverlayData {
+  enabled: boolean;
+  strategyLabel: string;
+  trades: BacktestTrade[];
 }
 
 interface KLineChartStageProps {
@@ -61,6 +87,14 @@ interface KLineChartStageProps {
   externalCrosshairTimestamp?: number | null;
   pickReplayStartMode?: boolean;
   replayBadge?: string | null;
+  paperOverlay?: PaperChartOverlayData | null;
+  onTogglePaperOverlay?: () => void;
+  alertOverlay?: AlertChartOverlayData | null;
+  onToggleAlertOverlay?: () => void;
+  backtestOverlay?: BacktestChartOverlayData | null;
+  onToggleBacktestOverlay?: () => void;
+  pendingRestoreDrawings?: TemplateDrawing[] | null;
+  onDrawingsRestored?: (records: DrawnOverlayRecord[]) => void;
   onChangeAnnotationText: (val: string) => void;
   onCancelDrawingTool: () => void;
   onCrosshairChange: (bar: NormalizedBar | null, prevClose: number | null) => void;
@@ -140,6 +174,55 @@ function formatMeasureDuration(diffMs: number, barCount: number, interval: Inter
 interface MeasureExtendData {
   pricePrecision: number;
   interval: Interval;
+}
+
+interface PaperPriceLineExtendData {
+  kind: "cost" | "buy_limit" | "sell_limit";
+  label: string;
+  priceText: string;
+  lineColor: string;
+  badgeBg: string;
+  badgeText: string;
+  lineStyle: "solid" | "dashed";
+  dashedValue: [number, number];
+}
+
+interface PaperFillMarkerExtendData {
+  side: "buy" | "sell";
+  label: string;
+  color: string;
+  badgeBg: string;
+  badgeText: string;
+}
+
+interface AlertPriceLineExtendData {
+  direction: "above" | "below";
+  label: string;
+  priceText: string;
+  lineColor: string;
+  badgeBg: string;
+  badgeText: string;
+}
+
+interface BacktestMarkerExtendData {
+  side: "buy" | "sell";
+  label: string;
+  color: string;
+  badgeBg: string;
+  badgeText: string;
+}
+
+const USER_DRAWING_GROUP_ID = "tb_user_drawings";
+const PAPER_OVERLAY_GROUP_ID = "tb_paper_overlays";
+const ALERT_OVERLAY_GROUP_ID = "tb_alert_overlays";
+const BACKTEST_OVERLAY_GROUP_ID = "tb_backtest_overlays";
+
+function formatOverlayQty(qty: number): string {
+  if (!Number.isFinite(qty)) return "0";
+  if (Math.abs(qty - Math.round(qty)) < 1e-6) {
+    return String(Math.round(qty));
+  }
+  return Number(qty.toFixed(4)).toString();
 }
 
 function computeMeasureStats(
@@ -516,6 +599,14 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       externalCrosshairTimestamp = null,
       pickReplayStartMode = false,
       replayBadge = null,
+      paperOverlay = null,
+      onTogglePaperOverlay,
+      alertOverlay = null,
+      onToggleAlertOverlay,
+      backtestOverlay = null,
+      onToggleBacktestOverlay,
+      pendingRestoreDrawings = null,
+      onDrawingsRestored,
       onChangeAnnotationText,
       onCancelDrawingTool,
       onCrosshairChange,
@@ -537,6 +628,9 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       null
     );
     const pendingOverlayIdRef = useRef<string | null>(null);
+    const paperOverlaySigRef = useRef<string>("");
+    const alertOverlaySigRef = useRef<string>("");
+    const backtestOverlaySigRef = useRef<string>("");
     const hadExternalCrosshairRef = useRef(false);
     const indicatorIdsRef = useRef<
       Partial<Record<IndicatorId, { id: string; paneId: string }>>
@@ -755,6 +849,325 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
           });
         }
 
+        // Register custom Trade Buddy Paper Price Line overlay (position cost & limit orders)
+        if (!kc.getSupportedOverlays().includes("tbPaperPriceLine")) {
+          kc.registerOverlay<PaperPriceLineExtendData>({
+            name: "tbPaperPriceLine",
+            totalStep: 2,
+            lock: true,
+            needDefaultPointFigure: false,
+            needDefaultXAxisFigure: false,
+            needDefaultYAxisFigure: false,
+            createPointFigures: ({ overlay, coordinates, bounding }) => {
+              const pt = coordinates[0];
+              const ext = overlay.extendData;
+              if (!pt || !Number.isFinite(pt.y) || !ext) return [];
+              const y = pt.y;
+              const labelY = y > 22 ? y - 3 : y + 16;
+              return [
+                {
+                  type: "line",
+                  attrs: {
+                    coordinates: [
+                      { x: 0, y },
+                      { x: bounding.width, y },
+                    ],
+                  },
+                  styles: {
+                    style: ext.lineStyle,
+                    color: ext.lineColor,
+                    size: ext.kind === "cost" ? 1.5 : 1.25,
+                    dashedValue: ext.dashedValue,
+                  },
+                  ignoreEvent: true,
+                },
+                {
+                  type: "text",
+                  attrs: {
+                    x: Math.max(8, bounding.width - 8),
+                    y: labelY,
+                    text: ext.label,
+                    align: "right",
+                    baseline: y > 22 ? "bottom" : "top",
+                  },
+                  styles: {
+                    style: "stroke_fill",
+                    color: ext.badgeText,
+                    size: 10,
+                    weight: "bold",
+                    backgroundColor: ext.badgeBg,
+                    borderColor: ext.lineColor,
+                    borderSize: 1,
+                    borderRadius: 3,
+                    paddingLeft: 6,
+                    paddingRight: 6,
+                    paddingTop: 2,
+                    paddingBottom: 2,
+                  },
+                  ignoreEvent: true,
+                },
+              ];
+            },
+            createYAxisFigures: ({ overlay, coordinates, bounding, yAxis }) => {
+              const pt = coordinates[0];
+              const ext = overlay.extendData;
+              if (!pt || !Number.isFinite(pt.y) || !ext) return [];
+              const isFromZero = yAxis?.isFromZero() ?? false;
+              return {
+                type: "text",
+                attrs: {
+                  x: isFromZero ? 0 : bounding.width,
+                  y: pt.y,
+                  text: ext.priceText,
+                  align: isFromZero ? "left" : "right",
+                  baseline: "middle",
+                },
+                styles: {
+                  style: "fill",
+                  color: "#FFFFFF",
+                  size: 10,
+                  weight: "bold",
+                  backgroundColor: ext.lineColor,
+                  borderRadius: 2,
+                  paddingLeft: 4,
+                  paddingRight: 4,
+                  paddingTop: 2,
+                  paddingBottom: 2,
+                },
+                ignoreEvent: true,
+              };
+            },
+          });
+        }
+
+        // Register custom Trade Buddy Paper Fill Marker overlay (buy / sell arrows on K-lines)
+        if (!kc.getSupportedOverlays().includes("tbPaperFillMarker")) {
+          kc.registerOverlay<PaperFillMarkerExtendData>({
+            name: "tbPaperFillMarker",
+            totalStep: 2,
+            lock: true,
+            needDefaultPointFigure: false,
+            needDefaultXAxisFigure: false,
+            needDefaultYAxisFigure: false,
+            createPointFigures: ({ overlay, coordinates }) => {
+              const pt = coordinates[0];
+              const ext = overlay.extendData;
+              if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y) || !ext) {
+                return [];
+              }
+              const isBuy = ext.side === "buy";
+              const tipY = isBuy ? pt.y + 6 : pt.y - 6;
+              const baseY = isBuy ? pt.y + 14 : pt.y - 14;
+              const labelY = isBuy ? pt.y + 17 : pt.y - 17;
+
+              return [
+                {
+                  type: "polygon",
+                  attrs: {
+                    coordinates: [
+                      { x: pt.x, y: tipY },
+                      { x: pt.x - 5, y: baseY },
+                      { x: pt.x + 5, y: baseY },
+                    ],
+                  },
+                  styles: {
+                    style: "stroke_fill",
+                    color: ext.color,
+                    borderColor: ext.badgeBg,
+                    borderSize: 1,
+                  },
+                  ignoreEvent: true,
+                },
+                {
+                  type: "text",
+                  attrs: {
+                    x: pt.x,
+                    y: labelY,
+                    text: ext.label,
+                    align: "center",
+                    baseline: isBuy ? "top" : "bottom",
+                  },
+                  styles: {
+                    style: "stroke_fill",
+                    color: ext.badgeText,
+                    size: 10,
+                    weight: "bold",
+                    backgroundColor: ext.badgeBg,
+                    borderColor: ext.color,
+                    borderSize: 1,
+                    borderRadius: 3,
+                    paddingLeft: 5,
+                    paddingRight: 5,
+                    paddingTop: 2,
+                    paddingBottom: 2,
+                  },
+                  ignoreEvent: true,
+                },
+              ];
+            },
+          });
+        }
+
+        // Register custom Trade Buddy Local Alert Price Line overlay
+        if (!kc.getSupportedOverlays().includes("tbAlertPriceLine")) {
+          kc.registerOverlay<AlertPriceLineExtendData>({
+            name: "tbAlertPriceLine",
+            totalStep: 2,
+            lock: true,
+            needDefaultPointFigure: false,
+            needDefaultXAxisFigure: false,
+            needDefaultYAxisFigure: false,
+            createPointFigures: ({ overlay, coordinates, bounding }) => {
+              const pt = coordinates[0];
+              const ext = overlay.extendData;
+              if (!pt || !Number.isFinite(pt.y) || !ext) return [];
+              const y = pt.y;
+              const labelY = y > 22 ? y - 3 : y + 16;
+              return [
+                {
+                  type: "line",
+                  attrs: {
+                    coordinates: [
+                      { x: 0, y },
+                      { x: bounding.width, y },
+                    ],
+                  },
+                  styles: {
+                    style: "dashed",
+                    color: ext.lineColor,
+                    size: 1.5,
+                    dashedValue: [5, 3],
+                  },
+                  ignoreEvent: true,
+                },
+                {
+                  type: "text",
+                  attrs: {
+                    x: 8,
+                    y: labelY,
+                    text: ext.label,
+                    align: "left",
+                    baseline: y > 22 ? "bottom" : "top",
+                  },
+                  styles: {
+                    style: "stroke_fill",
+                    color: ext.badgeText,
+                    size: 10,
+                    weight: "bold",
+                    backgroundColor: ext.badgeBg,
+                    borderColor: ext.lineColor,
+                    borderSize: 1,
+                    borderRadius: 3,
+                    paddingLeft: 6,
+                    paddingRight: 6,
+                    paddingTop: 2,
+                    paddingBottom: 2,
+                  },
+                  ignoreEvent: true,
+                },
+              ];
+            },
+            createYAxisFigures: ({ overlay, coordinates, bounding, yAxis }) => {
+              const pt = coordinates[0];
+              const ext = overlay.extendData;
+              if (!pt || !Number.isFinite(pt.y) || !ext) return [];
+              const isFromZero = yAxis?.isFromZero() ?? false;
+              return {
+                type: "text",
+                attrs: {
+                  x: isFromZero ? 0 : bounding.width,
+                  y: pt.y,
+                  text: ext.priceText,
+                  align: isFromZero ? "left" : "right",
+                  baseline: "middle",
+                },
+                styles: {
+                  style: "fill",
+                  color: "#FFFFFF",
+                  size: 10,
+                  weight: "bold",
+                  backgroundColor: ext.lineColor,
+                  borderRadius: 2,
+                  paddingLeft: 4,
+                  paddingRight: 4,
+                  paddingTop: 2,
+                  paddingBottom: 2,
+                },
+                ignoreEvent: true,
+              };
+            },
+          });
+        }
+
+        // Register custom Trade Buddy Backtest Trade Marker overlay (distinct diamond shape + sky/purple palette)
+        if (!kc.getSupportedOverlays().includes("tbBacktestMarker")) {
+          kc.registerOverlay<BacktestMarkerExtendData>({
+            name: "tbBacktestMarker",
+            totalStep: 2,
+            lock: true,
+            needDefaultPointFigure: false,
+            needDefaultXAxisFigure: false,
+            needDefaultYAxisFigure: false,
+            createPointFigures: ({ overlay, coordinates }) => {
+              const pt = coordinates[0];
+              const ext = overlay.extendData;
+              if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y) || !ext) {
+                return [];
+              }
+              const isBuy = ext.side === "buy";
+              const cy = isBuy ? pt.y + 11 : pt.y - 11;
+              const r = 4.8;
+              const labelY = isBuy ? cy + 8 : cy - 8;
+
+              return [
+                {
+                  type: "polygon",
+                  attrs: {
+                    coordinates: [
+                      { x: pt.x, y: cy - r },
+                      { x: pt.x + r, y: cy },
+                      { x: pt.x, y: cy + r },
+                      { x: pt.x - r, y: cy },
+                    ],
+                  },
+                  styles: {
+                    style: "stroke_fill",
+                    color: ext.color,
+                    borderColor: ext.badgeBg,
+                    borderSize: 1.2,
+                  },
+                  ignoreEvent: true,
+                },
+                {
+                  type: "text",
+                  attrs: {
+                    x: pt.x,
+                    y: labelY,
+                    text: ext.label,
+                    align: "center",
+                    baseline: isBuy ? "top" : "bottom",
+                  },
+                  styles: {
+                    style: "stroke_fill",
+                    color: ext.badgeText,
+                    size: 9.5,
+                    weight: "bold",
+                    backgroundColor: ext.badgeBg,
+                    borderColor: ext.color,
+                    borderSize: 1,
+                    borderRadius: 9,
+                    paddingLeft: 5,
+                    paddingRight: 5,
+                    paddingTop: 1.5,
+                    paddingBottom: 1.5,
+                  },
+                  ignoreEvent: true,
+                },
+              ];
+            },
+          });
+        }
+
         syncLiveMeasurePalette(theme, colorScheme);
         const chart = kc.init(containerRef.current, {
           locale: "zh-CN",
@@ -829,6 +1242,9 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
         disposed = true;
         observer?.disconnect();
         subscribeBarCbRef.current = null;
+        paperOverlaySigRef.current = "";
+        alertOverlaySigRef.current = "";
+        backtestOverlaySigRef.current = "";
         if (chartRef.current && disposeFn) {
           disposeFn(chartRef.current);
           chartRef.current = null;
@@ -1064,6 +1480,447 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
       chart.resize();
     }, [ready, activeIndicators]);
 
+    // Sync paper trading overlays (position cost line, open limit order lines, buy/sell fill markers)
+    useEffect(() => {
+      const chart = chartRef.current;
+      if (!ready || !chart) return;
+
+      if (!paperOverlay || !paperOverlay.enabled || bars.length === 0) {
+        if (paperOverlaySigRef.current !== "") {
+          chart.removeOverlay({ groupId: PAPER_OVERLAY_GROUP_ID });
+          paperOverlaySigRef.current = "";
+        }
+        return;
+      }
+
+      const palette = getChartPalette(theme, colorScheme);
+      const isDark = theme === "dark";
+      const badgeBg = isDark
+        ? "rgba(19, 23, 34, 0.92)"
+        : "rgba(255, 255, 255, 0.95)";
+      const badgeText = isDark ? "#E6EDF7" : "#111827";
+      const costColor = isDark ? "#F59E0B" : "#D97706";
+      const prec = symbol.pricePrecision;
+      const unitLabel = symbol.assetType === "STOCK" ? "股" : "份";
+
+      // Aggregate fills by nearest bar timestamp + side so same-bar fills stay clean and readable
+      const fillBuckets = new Map<
+        string,
+        {
+          side: "buy" | "sell";
+          barTimestamp: number;
+          anchorPrice: number;
+          count: number;
+          totalQty: number;
+          weightedPriceSum: number;
+        }
+      >();
+
+      for (const fill of paperOverlay.fills) {
+        const rawTs = fill.barTimestamp ?? Date.parse(fill.filledAt);
+        if (!Number.isFinite(rawTs)) continue;
+        const match = findNearestBarByTimestamp(bars, rawTs);
+        if (!match) continue;
+
+        const key = `${match.bar.timestamp}:${fill.side}`;
+        const existing = fillBuckets.get(key);
+        if (existing) {
+          existing.count += 1;
+          existing.totalQty += fill.quantity;
+          existing.weightedPriceSum += fill.price * fill.quantity;
+        } else {
+          fillBuckets.set(key, {
+            side: fill.side,
+            barTimestamp: match.bar.timestamp,
+            anchorPrice:
+              fill.side === "buy" ? match.bar.low : match.bar.high,
+            count: 1,
+            totalQty: fill.quantity,
+            weightedPriceSum: fill.price * fill.quantity,
+          });
+        }
+      }
+
+      const pos = paperOverlay.position;
+      const openOrders = paperOverlay.openOrders;
+      const fillEntries = Array.from(fillBuckets.values());
+
+      // Build lightweight signature to skip redundant canvas overlay recreation during replay ticks
+      const sigParts: string[] = [
+        symbol.id,
+        theme,
+        colorScheme,
+        pos ? `P:${pos.avgCost}:${pos.quantity}` : "P:none",
+        openOrders
+          .map((o) => `O:${o.id}:${o.side}:${o.limitPrice}:${o.quantity}`)
+          .join("|"),
+        fillEntries
+          .map(
+            (f) =>
+              `F:${f.barTimestamp}:${f.side}:${f.count}:${f.totalQty}:${f.weightedPriceSum.toFixed(
+                4
+              )}`
+          )
+          .join("|"),
+      ];
+      const nextSig = sigParts.join("#");
+      if (nextSig === paperOverlaySigRef.current) {
+        return;
+      }
+
+      chart.removeOverlay({ groupId: PAPER_OVERLAY_GROUP_ID });
+
+      const toCreate: Array<{
+        name: string;
+        groupId: string;
+        paneId: string;
+        lock: boolean;
+        zLevel: number;
+        fixedZLevel: boolean;
+        points: Array<{ timestamp?: number; value?: number }>;
+        extendData: PaperPriceLineExtendData | PaperFillMarkerExtendData;
+      }> = [];
+
+      // 1. Position Average Cost Line
+      if (pos && pos.avgCost > 0 && pos.quantity > 0) {
+        const priceText = pos.avgCost.toFixed(prec);
+        toCreate.push({
+          name: "tbPaperPriceLine",
+          groupId: PAPER_OVERLAY_GROUP_ID,
+          paneId: "candle_pane",
+          lock: true,
+          zLevel: -1,
+          fixedZLevel: true,
+          points: [{ value: pos.avgCost }],
+          extendData: {
+            kind: "cost",
+            label: `成本 ${priceText} · ${formatOverlayQty(pos.quantity)}${unitLabel}`,
+            priceText,
+            lineColor: costColor,
+            badgeBg,
+            badgeText,
+            lineStyle: "solid",
+            dashedValue: [4, 4],
+          },
+        });
+      }
+
+      // 2. Open Limit Order Lines (buy vs sell distinct dash pattern & color)
+      for (const ord of openOrders) {
+        if (ord.limitPrice === undefined || ord.limitPrice <= 0) continue;
+        const isBuy = ord.side === "buy";
+        const priceText = ord.limitPrice.toFixed(prec);
+        const lineColor = isBuy ? palette.upColor : palette.downColor;
+        toCreate.push({
+          name: "tbPaperPriceLine",
+          groupId: PAPER_OVERLAY_GROUP_ID,
+          paneId: "candle_pane",
+          lock: true,
+          zLevel: -1,
+          fixedZLevel: true,
+          points: [{ value: ord.limitPrice }],
+          extendData: {
+            kind: isBuy ? "buy_limit" : "sell_limit",
+            label: `限价${isBuy ? "买" : "卖"} ${priceText} · ${formatOverlayQty(
+              ord.quantity
+            )}${unitLabel}`,
+            priceText,
+            lineColor,
+            badgeBg,
+            badgeText,
+            lineStyle: "dashed",
+            dashedValue: isBuy ? [6, 3] : [2, 3],
+          },
+        });
+      }
+
+      // 3. Buy / Sell Fill Markers on corresponding K-lines
+      for (const entry of fillEntries) {
+        const isBuy = entry.side === "buy";
+        const avgPx =
+          entry.totalQty > 0 ? entry.weightedPriceSum / entry.totalQty : 0;
+        const color = isBuy ? palette.upColor : palette.downColor;
+        const label =
+          entry.count > 1
+            ? `${isBuy ? "买" : "卖"}×${entry.count} @${avgPx.toFixed(prec)}`
+            : `${isBuy ? "买" : "卖"} ${avgPx.toFixed(prec)}`;
+        toCreate.push({
+          name: "tbPaperFillMarker",
+          groupId: PAPER_OVERLAY_GROUP_ID,
+          paneId: "candle_pane",
+          lock: true,
+          zLevel: -1,
+          fixedZLevel: true,
+          points: [
+            { timestamp: entry.barTimestamp, value: entry.anchorPrice },
+          ],
+          extendData: {
+            side: entry.side,
+            label,
+            color,
+            badgeBg,
+            badgeText: color,
+          },
+        });
+      }
+
+      if (toCreate.length > 0) {
+        chart.createOverlay(toCreate);
+      }
+      paperOverlaySigRef.current = nextSig;
+    }, [
+      ready,
+      symbol.id,
+      symbol.pricePrecision,
+      symbol.assetType,
+      bars,
+      theme,
+      colorScheme,
+      paperOverlay,
+    ]);
+
+    // Sync local price alert lines on the main chart (dedicated overlay group)
+    useEffect(() => {
+      const chart = chartRef.current;
+      if (!ready || !chart) return;
+
+      const enabledPriceAlerts =
+        alertOverlay && alertOverlay.enabled
+          ? alertOverlay.priceAlerts.filter(
+              (a) =>
+                a.enabled &&
+                a.threshold !== undefined &&
+                Number.isFinite(a.threshold) &&
+                a.threshold > 0
+            )
+          : [];
+
+      if (enabledPriceAlerts.length === 0 || bars.length === 0) {
+        if (alertOverlaySigRef.current !== "") {
+          chart.removeOverlay({ groupId: ALERT_OVERLAY_GROUP_ID });
+          alertOverlaySigRef.current = "";
+        }
+        return;
+      }
+
+      const isDark = theme === "dark";
+      const badgeBg = isDark
+        ? "rgba(19, 23, 34, 0.92)"
+        : "rgba(255, 255, 255, 0.95)";
+      const badgeText = isDark ? "#E6EDF7" : "#111827";
+      const aboveColor = isDark ? "#06B6D4" : "#0891B2";
+      const belowColor = isDark ? "#C084FC" : "#9333EA";
+      const prec = symbol.pricePrecision;
+
+      const nextSig = [
+        symbol.id,
+        theme,
+        ...enabledPriceAlerts.map(
+          (a) => `${a.id}:${a.condition}:${a.threshold}:${a.note ?? ""}`
+        ),
+      ].join("#");
+
+      if (nextSig === alertOverlaySigRef.current) return;
+
+      chart.removeOverlay({ groupId: ALERT_OVERLAY_GROUP_ID });
+
+      const toCreate = enabledPriceAlerts.map((rule) => {
+        const isAbove = rule.condition === "price_cross_above";
+        const priceVal = rule.threshold!;
+        const priceText = priceVal.toFixed(prec);
+        const lineColor = isAbove ? aboveColor : belowColor;
+        const shortNote = rule.note ? ` · ${rule.note.slice(0, 12)}` : "";
+        return {
+          name: "tbAlertPriceLine",
+          groupId: ALERT_OVERLAY_GROUP_ID,
+          paneId: "candle_pane",
+          lock: true,
+          zLevel: -1,
+          fixedZLevel: true,
+          points: [{ value: priceVal }],
+          extendData: {
+            direction: isAbove ? "above" : "below",
+            label: `提醒 ${isAbove ? "↑上穿" : "↓下穿"} ${priceText}${shortNote}`,
+            priceText,
+            lineColor,
+            badgeBg,
+            badgeText,
+          } satisfies AlertPriceLineExtendData,
+        };
+      });
+
+      if (toCreate.length > 0) {
+        chart.createOverlay(toCreate);
+      }
+      alertOverlaySigRef.current = nextSig;
+    }, [ready, symbol.id, symbol.pricePrecision, bars, theme, alertOverlay]);
+
+    // Sync educational backtest buy/sell diamond markers on the main chart (dedicated overlay group)
+    useEffect(() => {
+      const chart = chartRef.current;
+      if (!ready || !chart) return;
+
+      if (
+        !backtestOverlay ||
+        !backtestOverlay.enabled ||
+        backtestOverlay.trades.length === 0 ||
+        bars.length === 0
+      ) {
+        if (backtestOverlaySigRef.current !== "") {
+          chart.removeOverlay({ groupId: BACKTEST_OVERLAY_GROUP_ID });
+          backtestOverlaySigRef.current = "";
+        }
+        return;
+      }
+
+      const isDark = theme === "dark";
+      const badgeBg = isDark
+        ? "rgba(15, 23, 42, 0.94)"
+        : "rgba(255, 255, 255, 0.96)";
+      const buyColor = isDark ? "#38BDF8" : "#0284C7";
+      const sellColor = isDark ? "#C084FC" : "#9333EA";
+      const prec = symbol.pricePrecision;
+
+      const matchedTrades: Array<{
+        trade: BacktestTrade;
+        barTimestamp: number;
+        anchorPrice: number;
+      }> = [];
+
+      for (const trade of backtestOverlay.trades) {
+        const match = findNearestBarByTimestamp(bars, trade.timestamp);
+        if (!match) continue;
+        matchedTrades.push({
+          trade,
+          barTimestamp: match.bar.timestamp,
+          anchorPrice: trade.side === "buy" ? match.bar.low : match.bar.high,
+        });
+      }
+
+      const nextSig = [
+        symbol.id,
+        theme,
+        backtestOverlay.strategyLabel,
+        ...matchedTrades.map(
+          (m) =>
+            `${m.trade.id}:${m.barTimestamp}:${m.trade.side}:${m.trade.price.toFixed(4)}`
+        ),
+      ].join("#");
+
+      if (nextSig === backtestOverlaySigRef.current) return;
+
+      chart.removeOverlay({ groupId: BACKTEST_OVERLAY_GROUP_ID });
+
+      const toCreate = matchedTrades.map((m) => {
+        const isBuy = m.trade.side === "buy";
+        const color = isBuy ? buyColor : sellColor;
+        const label = `${isBuy ? "测·买" : "测·卖"} ${m.trade.price.toFixed(
+          prec
+        )}`;
+        return {
+          name: "tbBacktestMarker",
+          groupId: BACKTEST_OVERLAY_GROUP_ID,
+          paneId: "candle_pane",
+          lock: true,
+          zLevel: -1,
+          fixedZLevel: true,
+          points: [{ timestamp: m.barTimestamp, value: m.anchorPrice }],
+          extendData: {
+            side: m.trade.side,
+            label,
+            color,
+            badgeBg,
+            badgeText: color,
+          } satisfies BacktestMarkerExtendData,
+        };
+      });
+
+      if (toCreate.length > 0) {
+        chart.createOverlay(toCreate);
+      }
+      backtestOverlaySigRef.current = nextSig;
+    }, [ready, symbol.id, symbol.pricePrecision, bars, theme, backtestOverlay]);
+
+    const restoreUserDrawingsImpl = useCallback(
+      (drawings: TemplateDrawing[]): DrawnOverlayRecord[] => {
+        const chart = chartRef.current;
+        if (!chart) return [];
+        pendingOverlayIdRef.current = null;
+        chart.removeOverlay({ groupId: USER_DRAWING_GROUP_ID });
+
+        const restoredRecords: DrawnOverlayRecord[] = [];
+        for (const d of drawings) {
+          if (!d.points || d.points.length === 0) continue;
+          const worldPoints = d.points
+            .filter(
+              (pt) =>
+                (typeof pt.timestamp === "number" && Number.isFinite(pt.timestamp)) ||
+                (typeof pt.value === "number" && Number.isFinite(pt.value))
+            )
+            .map((pt) => ({
+              ...(typeof pt.timestamp === "number" ? { timestamp: pt.timestamp } : {}),
+              ...(typeof pt.value === "number" ? { value: pt.value } : {}),
+            }));
+          if (worldPoints.length === 0) continue;
+
+          const extendData =
+            d.tool === "text"
+              ? d.annotationText ?? d.label.replace(/^文字：/, "")
+              : d.tool === "measure"
+              ? ({
+                  pricePrecision:
+                    d.measurePricePrecision ?? symbolPrecRef.current,
+                  interval: d.measureInterval ?? intervalRef.current,
+                } satisfies MeasureExtendData)
+              : undefined;
+
+          const created = chart.createOverlay({
+            name: d.klineOverlayName,
+            groupId: USER_DRAWING_GROUP_ID,
+            paneId: "candle_pane",
+            points: worldPoints,
+            extendData,
+            onPressedMoveEnd:
+              d.tool === "measure"
+                ? ({ overlay }) => {
+                    const stats = computeMeasureStats(
+                      overlay.points,
+                      chart.getDataList(),
+                      symbolPrecRef.current,
+                      intervalRef.current
+                    );
+                    onOverlayUpdatedRef.current?.(overlay.id, stats.shortLabel);
+                  }
+                : undefined,
+          });
+          const createdId = Array.isArray(created) ? created[0] : created;
+          if (typeof createdId === "string" && createdId) {
+            restoredRecords.push({
+              id: createdId,
+              tool: d.tool,
+              label: d.label,
+              klineOverlayName: d.klineOverlayName,
+              createdAt: d.createdAt || Date.now(),
+            });
+          }
+        }
+        return restoredRecords;
+      },
+      []
+    );
+
+    const onDrawingsRestoredRef = useRef(onDrawingsRestored);
+    onDrawingsRestoredRef.current = onDrawingsRestored;
+
+    // Automatically restore queued template drawings once chart & bars are ready
+    useEffect(() => {
+      if (!ready || loading || !pendingRestoreDrawings || bars.length === 0) {
+        return;
+      }
+      const restored = restoreUserDrawingsImpl(pendingRestoreDrawings);
+      onDrawingsRestoredRef.current?.(restored);
+    }, [ready, loading, bars, pendingRestoreDrawings, restoreUserDrawingsImpl]);
+
     // Adjust sub-pane heights smoothly when switching between single and multi-chart layouts
     useEffect(() => {
       const chart = chartRef.current;
@@ -1128,6 +1985,7 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
 
           const created = chart.createOverlay({
             name: spec.name,
+            groupId: USER_DRAWING_GROUP_ID,
             paneId: "candle_pane",
             mode: magnet ? "weak_magnet" : "normal",
             extendData,
@@ -1192,11 +2050,71 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
         },
         clearAllOverlays: () => {
           pendingOverlayIdRef.current = null;
-          chartRef.current?.removeOverlay();
+          chartRef.current?.removeOverlay({ groupId: USER_DRAWING_GROUP_ID });
         },
+        exportUserDrawings: (records: DrawnOverlayRecord[]): TemplateDrawing[] => {
+          const chart = chartRef.current;
+          if (!chart) return [];
+          const overlays = chart.getOverlays({ groupId: USER_DRAWING_GROUP_ID });
+          const byId = new Map(overlays.map((o) => [o.id, o]));
+          const result: TemplateDrawing[] = [];
+
+          for (const rec of records) {
+            const ov = byId.get(rec.id);
+            if (!ov || !ov.points || ov.points.length === 0) continue;
+            const worldPoints = ov.points
+              .map((pt) => {
+                const ts =
+                  typeof pt.timestamp === "number" && Number.isFinite(pt.timestamp)
+                    ? pt.timestamp
+                    : typeof pt.dataIndex === "number" &&
+                      barsRef.current[pt.dataIndex]
+                    ? barsRef.current[pt.dataIndex].timestamp
+                    : undefined;
+                const val =
+                  typeof pt.value === "number" && Number.isFinite(pt.value)
+                    ? pt.value
+                    : undefined;
+                return {
+                  ...(ts !== undefined ? { timestamp: ts } : {}),
+                  ...(val !== undefined ? { value: val } : {}),
+                };
+              })
+              .filter(
+                (pt) => pt.timestamp !== undefined || pt.value !== undefined
+              );
+
+            if (worldPoints.length === 0) continue;
+
+            const item: TemplateDrawing = {
+              id: rec.id,
+              tool: rec.tool,
+              label: rec.label,
+              klineOverlayName: rec.klineOverlayName,
+              points: worldPoints,
+              createdAt: rec.createdAt,
+            };
+
+            if (rec.tool === "text") {
+              item.annotationText =
+                typeof ov.extendData === "string"
+                  ? ov.extendData
+                  : rec.label.replace(/^文字：/, "");
+            } else if (rec.tool === "measure") {
+              const ext = ov.extendData as MeasureExtendData | undefined;
+              item.measurePricePrecision =
+                ext?.pricePrecision ?? symbolPrecRef.current;
+              item.measureInterval = ext?.interval ?? intervalRef.current;
+            }
+            result.push(item);
+          }
+
+          return result;
+        },
+        restoreUserDrawings: restoreUserDrawingsImpl,
         fitRange,
       }),
-      [fitRange]
+      [fitRange, restoreUserDrawingsImpl]
     );
 
     const handleTogglePctScale = () => {
@@ -1419,6 +2337,115 @@ export const KLineChartStage = forwardRef<KLineChartHandle, KLineChartStageProps
                   </button>
                 </span>
               ))}
+
+              {/* Quick Toggle for Paper Trading Chart Overlays (visible when this symbol has position/orders/fills) */}
+              {paperOverlay &&
+                onTogglePaperOverlay &&
+                (paperOverlay.position ||
+                  paperOverlay.openOrders.length > 0 ||
+                  paperOverlay.fills.length > 0) && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onTogglePaperOverlay();
+                    }}
+                    title="开关主图模拟盘标记（持仓成本线、限价挂单线、买卖点）"
+                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium border transition-colors cursor-pointer"
+                    style={
+                      paperOverlay.enabled
+                        ? {
+                            backgroundColor: "rgba(245, 158, 11, 0.16)",
+                            borderColor: "rgba(245, 158, 11, 0.45)",
+                            color: "var(--status-delayed)",
+                          }
+                        : {
+                            backgroundColor:
+                              theme === "dark"
+                                ? "rgba(19, 23, 34, 0.78)"
+                                : "rgba(247, 249, 252, 0.86)",
+                            borderColor: "var(--border-subtle)",
+                            color: "var(--text-muted)",
+                          }
+                    }
+                  >
+                    <span>
+                      模拟盘标记：{paperOverlay.enabled ? "开" : "关"}
+                    </span>
+                  </button>
+                )}
+
+              {/* Quick Toggle for Local Price Alert Lines */}
+              {alertOverlay &&
+                onToggleAlertOverlay &&
+                alertOverlay.priceAlerts.some((a) => a.enabled) && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleAlertOverlay();
+                    }}
+                    title="开关主图价格提醒线"
+                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium border transition-colors cursor-pointer"
+                    style={
+                      alertOverlay.enabled
+                        ? {
+                            backgroundColor: "rgba(6, 182, 212, 0.16)",
+                            borderColor: "rgba(6, 182, 212, 0.45)",
+                            color: "#06B6D4",
+                          }
+                        : {
+                            backgroundColor:
+                              theme === "dark"
+                                ? "rgba(19, 23, 34, 0.78)"
+                                : "rgba(247, 249, 252, 0.86)",
+                            borderColor: "var(--border-subtle)",
+                            color: "var(--text-muted)",
+                          }
+                    }
+                  >
+                    <span>
+                      提醒线：{alertOverlay.enabled ? "开" : "关"} (
+                      {alertOverlay.priceAlerts.filter((a) => a.enabled).length})
+                    </span>
+                  </button>
+                )}
+
+              {/* Quick Toggle for Educational Backtest Buy/Sell Markers */}
+              {backtestOverlay &&
+                onToggleBacktestOverlay &&
+                backtestOverlay.trades.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleBacktestOverlay();
+                    }}
+                    title={`开关主图回测买卖点（${backtestOverlay.strategyLabel}）`}
+                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium border transition-colors cursor-pointer"
+                    style={
+                      backtestOverlay.enabled
+                        ? {
+                            backgroundColor: "rgba(56, 189, 248, 0.16)",
+                            borderColor: "rgba(56, 189, 248, 0.45)",
+                            color: "#38BDF8",
+                          }
+                        : {
+                            backgroundColor:
+                              theme === "dark"
+                                ? "rgba(19, 23, 34, 0.78)"
+                                : "rgba(247, 249, 252, 0.86)",
+                            borderColor: "var(--border-subtle)",
+                            color: "var(--text-muted)",
+                          }
+                    }
+                  >
+                    <span>
+                      回测买卖点：{backtestOverlay.enabled ? "开" : "关"} (
+                      {backtestOverlay.trades.length})
+                    </span>
+                  </button>
+                )}
             </div>
           </div>
 

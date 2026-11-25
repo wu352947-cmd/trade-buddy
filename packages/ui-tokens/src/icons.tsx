@@ -414,3 +414,82 @@ export const IconPaperSim = ({ size = 14, className }: IconProps) => (
     <line x1="5.5" y1="11.8" x2="9.5" y2="11.8" />
   </svg>
 );
+
+export const IconBell = ({ size = 18, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M5.5 13.5V9.2C5.5 6.6 7.5 4.5 10 4.5C12.5 4.5 14.5 6.6 14.5 9.2V13.5L16 15H4L5.5 13.5Z" />
+    <path d="M8.4 15.2C8.6 16.2 9.2 16.8 10 16.8C10.8 16.8 11.4 16.2 11.6 15.2" />
+    <line x1="10" y1="2.8" x2="10" y2="4.5" />
+  </svg>
+);
+
+export const IconTemplate = ({ size = 15, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <rect x="3" y="3.5" width="14" height="13" rx="1.8" />
+    <line x1="3" y1="7.5" x2="17" y2="7.5" />
+    <line x1="8.5" y1="7.5" x2="8.5" y2="16.5" />
+    <line x1="8.5" y1="12" x2="17" y2="12" />
+  </svg>
+);
+
+export const IconPlus = ({ size = 14, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <line x1="10" y1="4" x2="10" y2="16" />
+    <line x1="4" y1="10" x2="16" y2="10" />
+  </svg>
+);
+
+export const IconEdit = ({ size = 13, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M12.8 4.2L15.8 7.2L7.5 15.5H4.5V12.5L12.8 4.2Z" />
+    <line x1="10.8" y1="6.2" x2="13.8" y2="9.2" />
+  </svg>
+);
+
+export const IconDragHandle = ({ size = 13, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <circle cx="7.5" cy="5.5" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="12.5" cy="5.5" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="7.5" cy="10" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="12.5" cy="10" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="7.5" cy="14.5" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="12.5" cy="14.5" r="0.9" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const IconDownload = ({ size = 14, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M10 3.5V12.2" />
+    <polyline points="6.5,9 10,12.5 13.5,9" />
+    <path d="M4 14.5V15.5C4 16 4.4 16.5 5 16.5H15C15.6 16.5 16 16 16 15.5V14.5" />
+  </svg>
+);
+
+export const IconUpload = ({ size = 14, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <path d="M10 12.5V3.8" />
+    <polyline points="6.5,7 10,3.5 13.5,7" />
+    <path d="M4 14.5V15.5C4 16 4.4 16.5 5 16.5H15C15.6 16.5 16 16 16 15.5V14.5" />
+  </svg>
+);
+
+export const IconStar = ({ size = 14, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <polygon points="10,3 12.1,7.3 16.8,8 13.4,11.3 14.2,16 10,13.7 5.8,16 6.6,11.3 3.2,8 7.9,7.3" />
+  </svg>
+);
+
+export const IconCheck = ({ size = 13, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <polyline points="4.5,10.5 8.2,14 15.5,6" />
+  </svg>
+);
+
+export const IconBacktest = ({ size = 14, className }: IconProps) => (
+  <svg {...baseProps(size, className)}>
+    <rect x="3" y="3.5" width="14" height="13" rx="1.8" />
+    <polyline points="5.5,12.5 8.5,9.5 11,11 14.5,6.8" />
+    <circle cx="8.5" cy="9.5" r="1" fill="currentColor" stroke="none" />
+    <circle cx="14.5" cy="6.8" r="1" fill="currentColor" stroke="none" />
+  </svg>
+);

@@ -2,6 +2,7 @@
 
 import React from "react";
 import {
+  IconBell,
   IconCalendar,
   IconDataWindow,
   IconFundamentals,
@@ -12,6 +13,7 @@ import {
 
 export type RightPanelTab =
   | "watchlist"
+  | "alerts"
   | "data"
   | "tree"
   | "fundamentals"
@@ -21,6 +23,8 @@ export type RightPanelTab =
 interface RightIconRailProps {
   activeTab: RightPanelTab | null;
   onSelectTab: (tab: RightPanelTab) => void;
+  alertUnreadCount?: number;
+  activeAlertRuleCount?: number;
 }
 
 const RAIL_ITEMS: Array<{
@@ -33,6 +37,11 @@ const RAIL_ITEMS: Array<{
     id: "watchlist",
     label: "自选列表与品种详情",
     icon: <IconWatchlist size={18} />,
+  },
+  {
+    id: "alerts",
+    label: "本地提醒与通知中心（仅页面打开时生效）",
+    icon: <IconBell size={18} />,
   },
   {
     id: "data",
@@ -61,7 +70,12 @@ const RAIL_ITEMS: Array<{
   },
 ];
 
-export function RightIconRail({ activeTab, onSelectTab }: RightIconRailProps) {
+export function RightIconRail({
+  activeTab,
+  onSelectTab,
+  alertUnreadCount = 0,
+  activeAlertRuleCount = 0,
+}: RightIconRailProps) {
   return (
     <nav
       aria-label="右侧功能导轨"
@@ -71,7 +85,7 @@ export function RightIconRail({ activeTab, onSelectTab }: RightIconRailProps) {
         const active = activeTab === item.id;
         return (
           <React.Fragment key={item.id}>
-            {idx === 3 && (
+            {idx === 4 && (
               <div className="my-1 h-px w-6 bg-[var(--border-hairline)]" />
             )}
             <button
@@ -87,6 +101,19 @@ export function RightIconRail({ activeTab, onSelectTab }: RightIconRailProps) {
               }`}
             >
               {item.icon}
+              {item.id === "alerts" && alertUnreadCount > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-[#F2485B] px-1 text-[9px] font-bold text-white tabular-nums">
+                  {alertUnreadCount > 9 ? "9+" : alertUnreadCount}
+                </span>
+              )}
+              {item.id === "alerts" &&
+                alertUnreadCount === 0 &&
+                activeAlertRuleCount > 0 && (
+                  <span
+                    className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full"
+                    style={{ backgroundColor: "#06B6D4" }}
+                  />
+                )}
               {item.placeholder && (
                 <span
                   className="absolute right-0.5 bottom-0.5 h-1.5 w-1.5 rounded-full"

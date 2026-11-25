@@ -1,9 +1,15 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import type { DataProvenance, SymbolMeta } from "@trade-buddy/shared-types";
+import type {
+  DataProvenance,
+  Interval,
+  NormalizedBar,
+  SymbolMeta,
+} from "@trade-buddy/shared-types";
 import type { AdapterEnvStatus } from "@trade-buddy/market-adapters";
 import {
+  IconBacktest,
   IconChevronDown,
   IconNotes,
   IconPaperSim,
@@ -11,34 +17,52 @@ import {
 } from "@trade-buddy/ui-tokens";
 
 import { PaperTradingPanel } from "@/components/panels/PaperTradingPanel";
+import {
+  BacktestPanel,
+  type BacktestPublishedOverlay,
+} from "@/components/panels/BacktestPanel";
 import type { PaperMarketSnapshot } from "@/lib/paper-trading";
 import { usePaperTrading } from "@/lib/paper-trading-store";
 
 interface BottomDockProps {
   symbol: SymbolMeta;
+  interval: Interval;
   provenance: DataProvenance;
+  fullBars: NormalizedBar[];
+  visibleBars: NormalizedBar[];
+  isReplayActive: boolean;
   envStatus: AdapterEnvStatus;
   activePaperSnapshot: PaperMarketSnapshot | null;
   paperSnapshotsBySymbol: Record<string, PaperMarketSnapshot>;
   markPriceBySymbol: Record<string, number>;
+  showBacktestMarkers: boolean;
+  onToggleBacktestMarkers: () => void;
+  onPublishBacktestOverlay: (overlay: BacktestPublishedOverlay | null) => void;
   onSelectSymbol: (symbolId: string) => void;
   onNotify?: (msg: string) => void;
 }
 
-type DockTab = "paper" | "notes" | "provenance";
+type DockTab = "paper" | "backtest" | "notes" | "provenance";
 
 export function BottomDock({
   symbol,
+  interval,
   provenance,
+  fullBars,
+  visibleBars,
+  isReplayActive,
   envStatus,
   activePaperSnapshot,
   paperSnapshotsBySymbol,
   markPriceBySymbol,
+  showBacktestMarkers,
+  onToggleBacktestMarkers,
+  onPublishBacktestOverlay,
   onSelectSymbol,
   onNotify,
 }: BottomDockProps) {
   const [expanded, setExpanded] = useState(false);
-  const [tallPaper, setTallPaper] = useState(false);
+  const [tallDock, setTallDock] = useState(false);
   const [activeTab, setActiveTab] = useState<DockTab>("paper");
   const [noteText, setNoteText] = useState("");
   const [savedAt, setSavedAt] = useState<string>("");
@@ -81,17 +105,22 @@ export function BottomDock({
     }
   };
 
+  const isRichTab = activeTab === "paper" || activeTab === "backtest";
   const dockHeight = !expanded
     ? 32
+    : activeTab === "backtest"
+    ? tallDock
+      ? 468
+      : 344
     : activeTab === "paper"
-    ? tallPaper
-      ? 368
-      : 276
+    ? tallDock
+      ? 404
+      : 288
     : 196;
 
   return (
     <section
-      aria-label="底部虚拟模拟盘、研究笔记与数据说明面板"
+      aria-label="底部虚拟模拟盘、策略回测、研究笔记与数据说明面板"
       className="tb-panel tb-border flex shrink-0 flex-col border-t transition-all"
       style={{ height: dockHeight }}
     >
@@ -128,6 +157,27 @@ export function BottomDock({
                 {positionsCount}仓{openOrdersCount > 0 ? `/${openOrdersCount}挂` : ""}
               </span>
             )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (expanded && activeTab === "backtest") {
+                setExpanded(false);
+              } else {
+                setActiveTab("backtest");
+                setExpanded(true);
+              }
+            }}
+            className={`flex items-center gap-1.5 rounded px-2 py-1 font-semibold transition-colors cursor-pointer ${
+              expanded && activeTab === "backtest"
+                ? "bg-[rgba(56,189,248,0.18)] text-[#38BDF8]"
+                : "tb-text-primary tb-hover"
+            }`}
+            title="打开教学回测沙盒（双均线/布林/RSI，1 倍现货无卖空，下一根开盘成交）"
+          >
+            <IconBacktest size={13} className="text-[#38BDF8]" />
+            <span>策略回测</span>
           </button>
 
           <button
@@ -176,14 +226,14 @@ export function BottomDock({
             当前来源：{provenance.provider}
             {provenance.dateRange ? `（${provenance.dateRange}）` : ""}
           </span>
-          {expanded && activeTab === "paper" && (
+          {expanded && isRichTab && (
             <button
               type="button"
-              onClick={() => setTallPaper((v) => !v)}
-              title={tallPaper ? "恢复标准高度" : "增高模拟盘面板"}
+              onClick={() => setTallDock((v) => !v)}
+              title={tallDock ? "恢复标准高度" : "增高底部工作区面板"}
               className="tb-hover rounded px-1.5 py-0.5 text-[10px] tb-text-secondary cursor-pointer"
             >
-              {tallPaper ? "标准高" : "加高"}
+              {tallDock ? "标准高" : "加高"}
             </button>
           )}
           <button
@@ -205,9 +255,7 @@ export function BottomDock({
       {expanded && (
         <div
           className={`tb-border flex-1 border-t text-[12px] ${
-            activeTab === "paper"
-              ? "overflow-hidden"
-              : "overflow-y-auto px-3 py-2"
+            isRichTab ? "overflow-hidden" : "overflow-y-auto px-3 py-2"
           }`}
         >
           {activeTab === "paper" ? (
@@ -217,6 +265,19 @@ export function BottomDock({
               snapshotsBySymbol={paperSnapshotsBySymbol}
               markPriceBySymbol={markPriceBySymbol}
               onSelectSymbol={onSelectSymbol}
+              onNotify={onNotify}
+            />
+          ) : activeTab === "backtest" ? (
+            <BacktestPanel
+              symbol={symbol}
+              interval={interval}
+              provenance={provenance}
+              fullBars={fullBars}
+              visibleBars={visibleBars}
+              isReplayActive={isReplayActive}
+              showChartMarkers={showBacktestMarkers}
+              onToggleChartMarkers={onToggleBacktestMarkers}
+              onPublishOverlay={onPublishBacktestOverlay}
               onNotify={onNotify}
             />
           ) : activeTab === "notes" ? (

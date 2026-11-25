@@ -3,16 +3,25 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type {
   MarketCategory,
+  WatchlistGroup,
   WatchlistSummaryItem,
 } from "@trade-buddy/shared-types";
 import { MARKET_GROUP_LABELS } from "@trade-buddy/shared-types";
-import { IconClose, IconSearch } from "@trade-buddy/ui-tokens";
+import {
+  IconCheck,
+  IconClose,
+  IconPlus,
+  IconSearch,
+} from "@trade-buddy/ui-tokens";
 
 interface SymbolSearchModalProps {
   open: boolean;
   initialQuery?: string;
   items: WatchlistSummaryItem[];
   currentSymbolId: string;
+  watchlistGroups?: WatchlistGroup[];
+  initialTargetGroupId?: string | null;
+  onToggleSymbolInGroup?: (groupId: string, symbolId: string) => void;
   onSelect: (symbolId: string) => void;
   onClose: () => void;
 }
@@ -30,11 +39,15 @@ export function SymbolSearchModal({
   initialQuery = "",
   items,
   currentSymbolId,
+  watchlistGroups = [],
+  initialTargetGroupId = null,
+  onToggleSymbolInGroup,
   onSelect,
   onClose,
 }: SymbolSearchModalProps) {
   const [query, setQuery] = useState(initialQuery);
   const [marketFilter, setMarketFilter] = useState<"ALL" | MarketCategory>("ALL");
+  const [targetGroupId, setTargetGroupId] = useState<string>("");
   const [highlightIdx, setHighlightIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -42,9 +55,20 @@ export function SymbolSearchModal({
     if (open) {
       setQuery(initialQuery);
       setHighlightIdx(0);
+      const preferred =
+        initialTargetGroupId &&
+        watchlistGroups.some((g) => g.id === initialTargetGroupId)
+          ? initialTargetGroupId
+          : watchlistGroups[0]?.id ?? "";
+      setTargetGroupId(preferred);
       setTimeout(() => inputRef.current?.focus(), 10);
     }
-  }, [open, initialQuery]);
+  }, [open, initialQuery, initialTargetGroupId, watchlistGroups]);
+
+  const activeTargetGroup = useMemo(
+    () => watchlistGroups.find((g) => g.id === targetGroupId) ?? watchlistGroups[0] ?? null,
+    [watchlistGroups, targetGroupId]
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -118,25 +142,45 @@ export function SymbolSearchModal({
           </button>
         </div>
 
-        {/* Market Filter Pills */}
-        <div className="tb-border flex items-center gap-1.5 border-b px-4 py-2">
-          {FILTER_TABS.map((tab) => {
-            const active = marketFilter === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setMarketFilter(tab.id)}
-                className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
-                  active
-                    ? "bg-[var(--accent-primary)] text-white"
-                    : "tb-text-secondary tb-hover"
-                }`}
+        {/* Market Filter Pills + Target Watchlist Group Picker */}
+        <div className="tb-border flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
+          <div className="flex items-center gap-1.5">
+            {FILTER_TABS.map((tab) => {
+              const active = marketFilter === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setMarketFilter(tab.id)}
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                    active
+                      ? "bg-[var(--accent-primary)] text-white"
+                      : "tb-text-secondary tb-hover"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {onToggleSymbolInGroup && watchlistGroups.length > 0 && (
+            <div className="flex items-center gap-1.5 text-[11px]">
+              <span className="tb-text-muted">加入分组：</span>
+              <select
+                value={activeTargetGroup?.id ?? ""}
+                onChange={(e) => setTargetGroupId(e.target.value)}
+                aria-label="选择目标自选分组"
+                className="tb-border-subtle rounded border bg-[var(--bg-input)] px-2 py-0.5 text-[11px] tb-text-primary outline-none focus:border-[var(--border-focus)]"
               >
-                {tab.label}
-              </button>
-            );
-          })}
+                {watchlistGroups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name} ({g.symbolIds.length})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         {/* Results */}
@@ -151,14 +195,25 @@ export function SymbolSearchModal({
               const isSelected = s.id === currentSymbolId;
               const isHighlighted = idx === highlightIdx;
               const isUp = item.quote.change >= 0;
+              const isInTargetGroup = Boolean(
+                activeTargetGroup?.symbolIds.includes(s.id)
+              );
               return (
-                <button
+                <div
                   key={s.id}
-                  type="button"
                   onMouseEnter={() => setHighlightIdx(idx)}
                   onClick={() => {
                     onSelect(s.id);
                     onClose();
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelect(s.id);
+                      onClose();
+                    }
                   }}
                   className={`flex w-full items-center justify-between px-4 py-2.5 text-left transition-colors cursor-pointer ${
                     isHighlighted ? "bg-[var(--bg-hover)]" : ""
@@ -199,7 +254,7 @@ export function SymbolSearchModal({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 shrink-0">
+                  <div className="flex items-center gap-2.5 shrink-0">
                     <div className="text-right tabular-nums">
                       <div className="text-[12px] font-medium tb-text-primary">
                         {item.quote.last > 0
@@ -226,8 +281,39 @@ export function SymbolSearchModal({
                     >
                       {s.exchange}
                     </span>
+                    {onToggleSymbolInGroup && activeTargetGroup && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleSymbolInGroup(activeTargetGroup.id, s.id);
+                        }}
+                        title={
+                          isInTargetGroup
+                            ? `从「${activeTargetGroup.name}」移除`
+                            : `加入「${activeTargetGroup.name}」`
+                        }
+                        className={`flex items-center gap-0.5 rounded border px-2 py-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+                          isInTargetGroup
+                            ? "border-[var(--accent-primary)] bg-[var(--accent-soft)] text-[var(--accent-primary)]"
+                            : "tb-border-subtle tb-text-secondary hover:text-[var(--text-primary)] tb-hover"
+                        }`}
+                      >
+                        {isInTargetGroup ? (
+                          <>
+                            <IconCheck size={11} />
+                            <span>已加入</span>
+                          </>
+                        ) : (
+                          <>
+                            <IconPlus size={11} />
+                            <span>自选</span>
+                          </>
+                        )}
+                      </button>
+                    )}
                   </div>
-                </button>
+                </div>
               );
             })
           )}

@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   DEFAULT_PAPER_INITIAL_CASH,
+  DEFAULT_PAPER_SETTINGS,
   type PaperOrderSide,
   type PaperOrderType,
   type SymbolMeta,
@@ -11,11 +12,20 @@ import { IconClose, IconPaperSim, IconRefresh } from "@trade-buddy/ui-tokens";
 
 import {
   computeAccountMetrics,
+  computeExecutionPrice,
   computeFrozenSellQty,
+  computeMaxBuyQty,
+  computePaperFee,
   getAvailableSellQty,
   type PaperMarketSnapshot,
 } from "@/lib/paper-trading";
+import {
+  computePaperReviewStats,
+  downloadEquityCurveCsv,
+  downloadFillsCsv,
+} from "@/lib/paper-stats";
 import { usePaperTrading } from "@/lib/paper-trading-store";
+import { PaperEquityChart } from "./PaperEquityChart";
 
 interface PaperTradingPanelProps {
   activeSymbol: SymbolMeta;
@@ -26,13 +36,40 @@ interface PaperTradingPanelProps {
   onNotify?: (msg: string) => void;
 }
 
-type PaperSubTab = "positions" | "orders" | "fills" | "rules";
+type PaperSubTab =
+  | "positions"
+  | "orders"
+  | "fills"
+  | "stats"
+  | "settings"
+  | "rules";
 
 const INITIAL_CASH_PRESETS = [
   { label: "10万", value: 100_000 },
   { label: "50万", value: 500_000 },
   { label: "100万", value: 1_000_000 },
   { label: "500万", value: 5_000_000 },
+];
+
+const FEE_SLIPPAGE_PRESETS = [
+  {
+    label: "默认 (0.1% / 最低0 / 滑点0.05%)",
+    feeRatePct: 0.1,
+    minFee: 0,
+    slippagePct: 0.05,
+  },
+  {
+    label: "零成本 (0% / 0 / 0%)",
+    feeRatePct: 0,
+    minFee: 0,
+    slippagePct: 0,
+  },
+  {
+    label: "低费率 (0.03% / 最低5 / 滑点0.02%)",
+    feeRatePct: 0.03,
+    minFee: 5,
+    slippagePct: 0.02,
+  },
 ];
 
 function fmtMoney(val: number, digits = 2): string {
@@ -89,6 +126,8 @@ export function PaperTradingPanel({
     account,
     initAccount,
     resetAccount,
+    updateSettings,
+    toggleChartMarkers,
     placeOrder,
     cancelOrder,
   } = usePaperTrading();
@@ -113,6 +152,21 @@ export function PaperTradingPanel({
     text: string;
   } | null>(null);
 
+  // Settings form state
+  const [feeRateInput, setFeeRateInput] = useState(
+    String(DEFAULT_PAPER_SETTINGS.feeRatePct)
+  );
+  const [minFeeInput, setMinFeeInput] = useState(
+    String(DEFAULT_PAPER_SETTINGS.minFee)
+  );
+  const [slippageInput, setSlippageInput] = useState(
+    String(DEFAULT_PAPER_SETTINGS.slippagePct)
+  );
+  const [settingsFeedback, setSettingsFeedback] = useState<{
+    kind: "error" | "ok";
+    text: string;
+  } | null>(null);
+
   // Sub-tab state
   const [subTab, setSubTab] = useState<PaperSubTab>("positions");
 
@@ -120,6 +174,18 @@ export function PaperTradingPanel({
     activeSnapshot && activeSnapshot.currentPrice > 0
       ? activeSnapshot.currentPrice
       : 0;
+
+  // Sync settings inputs when account settings change (e.g. hydrate or cross-tab sync)
+  useEffect(() => {
+    if (!account) return;
+    setFeeRateInput(String(account.settings.feeRatePct));
+    setMinFeeInput(String(account.settings.minFee));
+    setSlippageInput(String(account.settings.slippagePct));
+  }, [
+    account?.settings.feeRatePct,
+    account?.settings.minFee,
+    account?.settings.slippagePct,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep limit price prefilled sensibly when switching active symbol
   useEffect(() => {
@@ -133,6 +199,12 @@ export function PaperTradingPanel({
 
   const metrics = useMemo(
     () => (account ? computeAccountMetrics(account, markPriceBySymbol) : null),
+    [account, markPriceBySymbol]
+  );
+
+  const reviewStats = useMemo(
+    () =>
+      account ? computePaperReviewStats(account, markPriceBySymbol) : null,
     [account, markPriceBySymbol]
   );
 
@@ -158,23 +230,40 @@ export function PaperTradingPanel({
     [account, activeSymbol.id]
   );
 
+  const settings = account?.settings ?? DEFAULT_PAPER_SETTINGS;
   const parsedLimitPrice = Number(limitPriceInput);
   const parsedQty = Number(quantityInput);
-  const effectiveRefPrice =
-    orderType === "limit"
-      ? Number.isFinite(parsedLimitPrice) && parsedLimitPrice > 0
+
+  // Effective estimated execution price (factoring in slippage for market orders)
+  const effectiveEstPrice = useMemo(() => {
+    if (orderType === "limit") {
+      return Number.isFinite(parsedLimitPrice) && parsedLimitPrice > 0
         ? parsedLimitPrice
-        : activePrice
-      : activePrice;
+        : activePrice;
+    }
+    if (activePrice <= 0) return 0;
+    return computeExecutionPrice(
+      side,
+      "market",
+      activePrice,
+      undefined,
+      settings.slippagePct
+    );
+  }, [orderType, parsedLimitPrice, activePrice, side, settings.slippagePct]);
 
   const estimatedNotional =
-    Number.isFinite(parsedQty) && parsedQty > 0 && effectiveRefPrice > 0
-      ? parsedQty * effectiveRefPrice
+    Number.isFinite(parsedQty) && parsedQty > 0 && effectiveEstPrice > 0
+      ? parsedQty * effectiveEstPrice
+      : 0;
+
+  const estimatedFee =
+    estimatedNotional > 0
+      ? computePaperFee(estimatedNotional, settings)
       : 0;
 
   const maxBuyQty =
-    metrics && effectiveRefPrice > 0
-      ? Math.floor(metrics.availableCash / effectiveRefPrice)
+    metrics && effectiveEstPrice > 0
+      ? computeMaxBuyQty(metrics.availableCash, effectiveEstPrice, settings)
       : 0;
 
   const handleInitAccount = (e: React.FormEvent) => {
@@ -192,7 +281,10 @@ export function PaperTradingPanel({
   const handleConfirmReset = () => {
     const num = Number(resetCashInput);
     if (!Number.isFinite(num) || num <= 0) {
-      setTicketFeedback({ kind: "error", text: "重置初始虚拟资金必须大于 0" });
+      setTicketFeedback({
+        kind: "error",
+        text: "重置初始虚拟资金必须大于 0",
+      });
       return;
     }
     resetAccount(num);
@@ -207,9 +299,9 @@ export function PaperTradingPanel({
   const handleApplyPct = (pct: number) => {
     if (!metrics) return;
     if (side === "buy") {
-      if (effectiveRefPrice <= 0) return;
-      const raw = (metrics.availableCash * pct) / effectiveRefPrice;
-      const qty = raw >= 1 ? Math.floor(raw) : Math.floor(raw * 100) / 100;
+      if (effectiveEstPrice <= 0) return;
+      const targetBudget = metrics.availableCash * pct;
+      const qty = computeMaxBuyQty(targetBudget, effectiveEstPrice, settings);
       if (qty > 0) {
         setQuantityInput(String(qty));
       }
@@ -242,9 +334,14 @@ export function PaperTradingPanel({
       orderType === "limit" ? Number(limitPriceInput) : undefined;
     if (
       orderType === "limit" &&
-      (limitPrice === undefined || !Number.isFinite(limitPrice) || limitPrice <= 0)
+      (limitPrice === undefined ||
+        !Number.isFinite(limitPrice) ||
+        limitPrice <= 0)
     ) {
-      setTicketFeedback({ kind: "error", text: "限价单必须输入大于 0 的委托价" });
+      setTicketFeedback({
+        kind: "error",
+        text: "限价单必须输入大于 0 的委托价",
+      });
       return;
     }
 
@@ -262,11 +359,15 @@ export function PaperTradingPanel({
         leverage: 1,
         allowShort: false,
       },
-      activeSnapshot
+      activeSnapshot,
+      markPriceBySymbol
     );
 
     if (!res.ok) {
-      setTicketFeedback({ kind: "error", text: res.error ?? "委托提交失败" });
+      setTicketFeedback({
+        kind: "error",
+        text: res.error ?? "委托提交失败",
+      });
       return;
     }
 
@@ -312,7 +413,8 @@ export function PaperTradingPanel({
         leverage: 1,
         allowShort: false,
       },
-      snap
+      snap,
+      markPriceBySymbol
     );
 
     if (res.ok) {
@@ -331,6 +433,70 @@ export function PaperTradingPanel({
     }
   };
 
+  const handleSaveSettings = (e: React.FormEvent) => {
+    e.preventDefault();
+    setSettingsFeedback(null);
+    const feeRatePct = Number(feeRateInput);
+    const minFee = Number(minFeeInput);
+    const slippagePct = Number(slippageInput);
+
+    if (!Number.isFinite(feeRatePct) || feeRatePct < 0 || feeRatePct > 5) {
+      setSettingsFeedback({
+        kind: "error",
+        text: "手续费率须在 0% 至 5% 之间",
+      });
+      return;
+    }
+    if (!Number.isFinite(minFee) || minFee < 0 || minFee > 10_000) {
+      setSettingsFeedback({
+        kind: "error",
+        text: "最低每笔手续费须在 0 至 10,000 之间",
+      });
+      return;
+    }
+    if (!Number.isFinite(slippagePct) || slippagePct < 0 || slippagePct > 5) {
+      setSettingsFeedback({
+        kind: "error",
+        text: "滑点比例须在 0% 至 5% 之间",
+      });
+      return;
+    }
+
+    updateSettings({ feeRatePct, minFee, slippagePct });
+    const msg = `已保存模拟盘设置（费率 ${feeRatePct}% · 最低 ${minFee} · 滑点 ${slippagePct}%）`;
+    setSettingsFeedback({ kind: "ok", text: msg });
+    onNotify?.(msg);
+  };
+
+  const handleApplyPreset = (preset: (typeof FEE_SLIPPAGE_PRESETS)[number]) => {
+    setFeeRateInput(String(preset.feeRatePct));
+    setMinFeeInput(String(preset.minFee));
+    setSlippageInput(String(preset.slippagePct));
+    updateSettings({
+      feeRatePct: preset.feeRatePct,
+      minFee: preset.minFee,
+      slippagePct: preset.slippagePct,
+    });
+    const msg = `已应用预设：${preset.label}`;
+    setSettingsFeedback({ kind: "ok", text: msg });
+    onNotify?.(msg);
+  };
+
+  const handleExportFills = () => {
+    if (!account) return;
+    const filename = downloadFillsCsv(account.fills);
+    onNotify?.(`已导出成交记录 CSV：${filename}`);
+  };
+
+  const handleExportEquity = () => {
+    if (!account || !reviewStats) return;
+    const filename = downloadEquityCurveCsv(
+      reviewStats.equitySeries,
+      account.initialCash
+    );
+    onNotify?.(`已导出权益曲线 CSV：${filename}`);
+  };
+
   if (!hydrated) {
     return (
       <div className="flex h-full items-center justify-center text-[11px] tb-text-muted">
@@ -340,7 +506,7 @@ export function PaperTradingPanel({
   }
 
   // First-time Initialization View
-  if (!account || !metrics) {
+  if (!account || !metrics || !reviewStats) {
     return (
       <div className="flex h-full flex-col justify-center overflow-y-auto px-3 py-2">
         <div className="mx-auto flex w-full max-w-[680px] flex-col gap-2.5 rounded-md border tb-border bg-[var(--bg-canvas)] p-3.5">
@@ -366,7 +532,9 @@ export function PaperTradingPanel({
           </div>
 
           <p className="text-[11px] leading-relaxed tb-text-secondary">
-            本功能为纯本地虚拟练习账户，使用虚拟计价资金对图表当前可见价或 K 线回放价进行 1 倍现货模拟撮合（仅可用虚拟现金买入、仅可卖出已有持仓），所有记录均留存在本机浏览器中。
+            本功能为纯本地虚拟练习账户，使用虚拟计价资金对图表当前可见价或 K
+            线回放价进行 1 倍现货模拟撮合（默认手续费 0.1%、滑点
+            0.05%，开户后可在「费率设置」随时修改），支持主图叠加成本线/挂单线/买卖点与复盘统计 CSV 导出。
           </p>
 
           <form
@@ -420,9 +588,16 @@ export function PaperTradingPanel({
     );
   }
 
+  const plRatioDisplay =
+    reviewStats.profitLossRatio === null
+      ? "—"
+      : !Number.isFinite(reviewStats.profitLossRatio)
+      ? "∞（无亏损回合）"
+      : `${reviewStats.profitLossRatio.toFixed(2)} : 1`;
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      {/* Persistent Top Banner: Always visible 「虚拟资金·模拟」 badge + KPIs + Pricing Mode + Reset */}
+      {/* Persistent Top Banner: Always visible 「虚拟资金·模拟」 badge + KPIs + Pricing Mode + Chart Markers Toggle + Reset */}
       <div className="tb-border flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b bg-[var(--bg-canvas)] px-3 py-1.5 text-[11px]">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span
@@ -441,7 +616,11 @@ export function PaperTradingPanel({
             <span className="font-semibold tb-text-primary">
               {fmtMoney(metrics.totalEquity)}
             </span>
-            <span className={`text-[10px] font-medium ${pnlColorClass(metrics.totalPnl)}`}>
+            <span
+              className={`text-[10px] font-medium ${pnlColorClass(
+                metrics.totalPnl
+              )}`}
+            >
               ({metrics.totalPnl >= 0 ? "+" : ""}
               {metrics.totalPnlPct.toFixed(2)}%)
             </span>
@@ -468,20 +647,26 @@ export function PaperTradingPanel({
 
           <div className="flex items-center gap-1 tabular-nums">
             <span className="tb-text-muted">浮动盈亏</span>
-            <span className={`font-semibold ${pnlColorClass(metrics.unrealizedPnl)}`}>
+            <span
+              className={`font-semibold ${pnlColorClass(
+                metrics.unrealizedPnl
+              )}`}
+            >
               {fmtSignedMoney(metrics.unrealizedPnl)}
             </span>
           </div>
 
           <div className="hidden lg:flex items-center gap-1 tabular-nums">
             <span className="tb-text-muted">已实现盈亏</span>
-            <span className={`font-medium ${pnlColorClass(metrics.realizedPnl)}`}>
+            <span
+              className={`font-medium ${pnlColorClass(metrics.realizedPnl)}`}
+            >
               {fmtSignedMoney(metrics.realizedPnl)}
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           {/* Active Matching Source Pill */}
           {activeSnapshot && activeSnapshot.currentPrice > 0 ? (
             <span
@@ -499,7 +684,7 @@ export function PaperTradingPanel({
               }
               title={
                 activeSnapshot.mode === "replay"
-                  ? "回放撮合模式：市价单按当前回放根收盘价成交，限价单在后续回放根 high/low 触及后成交"
+                  ? "回放撮合模式：市价单按当前回放根收盘价含滑点成交，限价单在后续回放根 high/low 触及后成交"
                   : "非回放撮合模式：按活动图当前品种最新可见行情价格撮合"
               }
             >
@@ -516,6 +701,20 @@ export function PaperTradingPanel({
               当前品种无可用价格
             </span>
           )}
+
+          {/* Toggle Paper Trading Overlays on Main Chart */}
+          <button
+            type="button"
+            onClick={toggleChartMarkers}
+            title="开关主图叠加：持仓成本线、未成交限价挂单线、买卖点标记（多图下仅绘制在对应品种图上）"
+            className={`rounded border px-2 py-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+              settings.showChartMarkers
+                ? "border-[rgba(245,158,11,0.5)] bg-[rgba(245,158,11,0.16)] text-[var(--status-delayed)]"
+                : "tb-border-subtle tb-text-muted tb-hover"
+            }`}
+          >
+            显示模拟盘标记：{settings.showChartMarkers ? "开" : "关"}
+          </button>
 
           {/* Reset Account Trigger */}
           <button
@@ -542,7 +741,7 @@ export function PaperTradingPanel({
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-semibold tb-down">确认重置虚拟账户？</span>
             <span className="tb-text-primary">
-              将清空全部持仓、挂单与成交记录，并重置初始虚拟现金：
+              将清空全部持仓、挂单、成交与权益曲线，并重置初始虚拟现金：
             </span>
             <input
               type="number"
@@ -573,12 +772,12 @@ export function PaperTradingPanel({
         </div>
       )}
 
-      {/* Main Split Content: Left Order Ticket | Right Tables */}
+      {/* Main Split Content: Left Order Ticket | Right Tables & Review Stats */}
       <div className="flex min-h-0 flex-1 flex-col md:flex-row overflow-hidden">
         {/* Left: Compact Order Ticket */}
         <form
           onSubmit={handleSubmitOrder}
-          className="tb-border flex w-full md:w-[300px] lg:w-[320px] shrink-0 flex-col gap-1.5 overflow-y-auto border-b md:border-b-0 md:border-r px-3 py-2 text-[11px]"
+          className="tb-border flex w-full md:w-[304px] lg:w-[324px] shrink-0 flex-col gap-1.5 overflow-y-auto border-b md:border-b-0 md:border-r px-3 py-2 text-[11px]"
         >
           {/* Active Target Header */}
           <div className="flex items-center justify-between gap-1">
@@ -593,9 +792,14 @@ export function PaperTradingPanel({
                 {activeSymbol.currency}
               </span>
             </div>
-            <span className="shrink-0 text-[10px] tb-text-muted">
-              1倍现货 · 禁卖空
-            </span>
+            <button
+              type="button"
+              onClick={() => setSubTab("settings")}
+              title="点击前往模拟盘手续费与滑点设置"
+              className="shrink-0 rounded bg-[var(--bg-elevated)] px-1.5 py-0.2 text-[9px] tb-text-muted hover:text-[var(--accent-primary)] tabular-nums cursor-pointer"
+            >
+              费{settings.feeRatePct}% · 滑{settings.slippagePct}%
+            </button>
           </div>
 
           {/* Buy / Sell & Market / Limit Row */}
@@ -683,7 +887,9 @@ export function PaperTradingPanel({
                     type="button"
                     onClick={() =>
                       setLimitPriceInput(
-                        (activePrice * 0.98).toFixed(activeSymbol.pricePrecision)
+                        (activePrice * 0.98).toFixed(
+                          activeSymbol.pricePrecision
+                        )
                       )
                     }
                     title="设为现价 -2%"
@@ -707,7 +913,9 @@ export function PaperTradingPanel({
                     type="button"
                     onClick={() =>
                       setLimitPriceInput(
-                        (activePrice * 1.02).toFixed(activeSymbol.pricePrecision)
+                        (activePrice * 1.02).toFixed(
+                          activeSymbol.pricePrecision
+                        )
                       )
                     }
                     title="设为现价 +2%"
@@ -750,26 +958,43 @@ export function PaperTradingPanel({
             </div>
           </div>
 
-          {/* Constraints & Notional Preview */}
-          <div className="flex items-center justify-between text-[10px] tb-text-muted tabular-nums">
-            <span>
-              预计金额：
-              <strong className="tb-text-primary font-medium">
-                {estimatedNotional > 0 ? fmtMoney(estimatedNotional) : "—"}
-              </strong>
-            </span>
-            {side === "buy" ? (
-              <span>最大可买：{fmtQty(maxBuyQty)}</span>
-            ) : (
+          {/* Constraints, Slippage Price & Fee Preview */}
+          <div className="space-y-0.5 text-[10px] tb-text-muted tabular-nums">
+            <div className="flex items-center justify-between">
               <span>
-                可用持仓：{fmtQty(activeAvailableSellQty)}
-                {activeFrozenSellQty > 0
-                  ? ` (冻结 ${fmtQty(activeFrozenSellQty)})`
-                  : activePosition
-                  ? ""
-                  : " (无持仓)"}
+                预计金额：
+                <strong className="tb-text-primary font-medium">
+                  {estimatedNotional > 0 ? fmtMoney(estimatedNotional) : "—"}
+                </strong>
+                {estimatedFee > 0 && (
+                  <span className="ml-1 tb-text-muted">
+                    (费 {fmtMoney(estimatedFee)})
+                  </span>
+                )}
               </span>
-            )}
+              {side === "buy" ? (
+                <span>最大可买：{fmtQty(maxBuyQty)}</span>
+              ) : (
+                <span>
+                  可用持仓：{fmtQty(activeAvailableSellQty)}
+                  {activeFrozenSellQty > 0
+                    ? ` (冻 ${fmtQty(activeFrozenSellQty)})`
+                    : activePosition
+                    ? ""
+                    : " (无持仓)"}
+                </span>
+              )}
+            </div>
+            {orderType === "market" &&
+              activePrice > 0 &&
+              settings.slippagePct > 0 && (
+                <div className="flex items-center justify-between text-[9.5px]">
+                  <span>
+                    含滑点预估价：{effectiveEstPrice.toFixed(activeSymbol.pricePrecision)}
+                  </span>
+                  <span>1倍现货 · 禁卖空</span>
+                </div>
+              )}
           </div>
 
           {/* Submit Button */}
@@ -800,17 +1025,17 @@ export function PaperTradingPanel({
           ) : (
             <div className="text-[10px] leading-snug tb-text-muted">
               {activeSnapshot?.mode === "replay"
-                ? "回放撮合：市价按当前回放根收盘价成交；限价单在后续回放根高低价触及后成交。"
-                : "当前价撮合：市价按最新可见价成交；未成交限价单随新行情或回放步进自动尝试成交。"}
+                ? "回放撮合：市价按当前回放根收盘价±滑点成交；限价单在后续回放根触及后成交且不劣于限价。"
+                : "当前价撮合：市价按最新可见价±滑点成交；限价单成交价不劣于委托价，手续费从现金扣除。"}
             </div>
           )}
         </form>
 
-        {/* Right: Positions / Open Orders / Fills / Rules */}
+        {/* Right: Positions / Open Orders / Fills / Review Stats / Fee Settings / Rules */}
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {/* Sub-tab Strip */}
           <div className="tb-border flex h-[28px] shrink-0 items-center justify-between border-b px-2.5 text-[11px]">
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 overflow-x-auto">
               {(
                 [
                   {
@@ -825,14 +1050,22 @@ export function PaperTradingPanel({
                     id: "fills" as const,
                     label: `成交记录 (${account.fills.length})`,
                   },
-                  { id: "rules" as const, label: "模拟规则" },
+                  {
+                    id: "stats" as const,
+                    label: "复盘统计",
+                  },
+                  {
+                    id: "settings" as const,
+                    label: "费率设置",
+                  },
+                  { id: "rules" as const, label: "规则" },
                 ] as const
               ).map((tab) => (
                 <button
                   key={tab.id}
                   type="button"
                   onClick={() => setSubTab(tab.id)}
-                  className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                  className={`shrink-0 rounded px-2 py-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
                     subTab === tab.id
                       ? "bg-[var(--accent-soft)] text-[var(--accent-primary)]"
                       : "tb-text-secondary tb-hover"
@@ -842,19 +1075,21 @@ export function PaperTradingPanel({
                 </button>
               ))}
             </div>
-            <span className="hidden lg:inline text-[10px] tb-text-muted">
+            <span className="hidden xl:inline text-[10px] tb-text-muted shrink-0">
               单一虚拟计价货币（跨市场按面值 1:1 记账）
             </span>
           </div>
 
           {/* Sub-tab Body */}
           <div className="flex-1 overflow-auto px-2.5 py-1.5 text-[11px]">
-            {subTab === "positions" && (
-              account.positions.length === 0 ? (
+            {/* 1. Positions */}
+            {subTab === "positions" &&
+              (account.positions.length === 0 ? (
                 <div className="flex h-full min-h-[110px] flex-col items-center justify-center gap-1 text-center tb-text-muted">
                   <div>当前暂无虚拟持仓</div>
                   <div className="text-[10px]">
-                    可在左侧对活动图品种 {activeSymbol.ticker} 下市价单或限价单进行虚拟练习
+                    可在左侧对活动图品种 {activeSymbol.ticker}{" "}
+                    下市价单或限价单进行虚拟练习，成交后主图将自动标注成本线与买点
                   </div>
                 </div>
               ) : (
@@ -863,10 +1098,17 @@ export function PaperTradingPanel({
                     <tr>
                       <th className="py-1 pr-2 font-medium">品种</th>
                       <th className="py-1 px-2 text-right font-medium">持仓数</th>
-                      <th className="py-1 px-2 text-right font-medium">成本价</th>
+                      <th
+                        className="py-1 px-2 text-right font-medium"
+                        title="已包含买入手续费的单位保本成本价"
+                      >
+                        成本价(含费)
+                      </th>
                       <th className="py-1 px-2 text-right font-medium">现价</th>
                       <th className="py-1 px-2 text-right font-medium">市值</th>
-                      <th className="py-1 px-2 text-right font-medium">浮动盈亏</th>
+                      <th className="py-1 px-2 text-right font-medium">
+                        浮动盈亏
+                      </th>
                       <th className="py-1 pl-2 text-right font-medium">操作</th>
                     </tr>
                   </thead>
@@ -956,178 +1198,545 @@ export function PaperTradingPanel({
                     })}
                   </tbody>
                 </table>
-              )
-            )}
+              ))}
 
-            {subTab === "orders" && (
-              openOrders.length === 0 ? (
+            {/* 2. Open Limit Orders */}
+            {subTab === "orders" &&
+              (openOrders.length === 0 ? (
                 <div className="flex h-full min-h-[110px] flex-col items-center justify-center gap-1 text-center tb-text-muted">
                   <div>当前暂无未成交限价挂单</div>
                   <div className="text-[10px]">
-                    限价单在价格未立即触及时会保留在此，随最新行情或回放步进自动撮合
+                    限价单在价格未立即触及时会保留在此，并在对应品种主图绘制挂单价位线
                   </div>
                 </div>
               ) : (
-                <table className="w-full min-w-[540px] border-collapse text-left tabular-nums">
+                <table className="w-full min-w-[560px] border-collapse text-left tabular-nums">
                   <thead className="tb-border border-b text-[10px] tb-text-muted">
                     <tr>
                       <th className="py-1 pr-2 font-medium">品种</th>
                       <th className="py-1 px-2 font-medium">方向 / 类型</th>
-                      <th className="py-1 px-2 text-right font-medium">委托价</th>
+                      <th className="py-1 px-2 text-right font-medium">
+                        委托价
+                      </th>
                       <th className="py-1 px-2 text-right font-medium">数量</th>
-                      <th className="py-1 px-2 text-right font-medium">冻结</th>
+                      <th className="py-1 px-2 text-right font-medium">
+                        冻结(含预估费)
+                      </th>
                       <th className="py-1 px-2 font-medium">下单时间</th>
                       <th className="py-1 pl-2 text-right font-medium">操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-hairline)]">
-                    {openOrders.map((ord) => (
-                      <tr key={ord.id} className="tb-hover">
-                        <td className="py-1.5 pr-2">
-                          <button
-                            type="button"
-                            onClick={() => onSelectSymbol(ord.symbolId)}
-                            className="font-semibold tb-text-primary hover:text-[var(--accent-primary)] cursor-pointer"
-                          >
-                            {ord.ticker}
-                          </button>
-                        </td>
-                        <td className="py-1.5 px-2">
-                          <span
-                            className={`rounded px-1.5 py-0.2 text-[10px] font-semibold ${
-                              ord.side === "buy" ? "tb-up-bg" : "tb-down-bg"
-                            }`}
-                          >
-                            {ord.side === "buy" ? "买入" : "卖出"} · 限价
-                          </span>
-                        </td>
-                        <td className="py-1.5 px-2 text-right font-medium tb-text-primary">
-                          {ord.limitPrice !== undefined
-                            ? ord.limitPrice.toFixed(ord.pricePrecision)
-                            : "—"}
-                        </td>
-                        <td className="py-1.5 px-2 text-right tb-text-primary">
-                          {fmtQty(ord.quantity)}
-                        </td>
-                        <td className="py-1.5 px-2 text-right tb-text-secondary">
-                          {ord.side === "buy" && ord.limitPrice
-                            ? `现金 ${fmtMoney(ord.limitPrice * ord.quantity)}`
-                            : `持仓 ${fmtQty(ord.quantity)}`}
-                        </td>
-                        <td className="py-1.5 px-2 text-[10px] tb-text-muted">
-                          {fmtLocalTime(ord.createdAt)}
-                        </td>
-                        <td className="py-1.5 pl-2 text-right">
-                          <button
-                            type="button"
-                            onClick={() => handleCancelOrder(ord.id)}
-                            className="tb-border-subtle tb-hover inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] tb-text-secondary hover:text-[var(--market-down)] cursor-pointer"
-                          >
-                            <IconClose size={10} />
-                            <span>撤单</span>
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {openOrders.map((ord) => {
+                      const buyNotional =
+                        ord.side === "buy" && ord.limitPrice
+                          ? ord.limitPrice * ord.quantity
+                          : 0;
+                      const buyFrozen =
+                        buyNotional > 0
+                          ? buyNotional + computePaperFee(buyNotional, settings)
+                          : 0;
+                      return (
+                        <tr key={ord.id} className="tb-hover">
+                          <td className="py-1.5 pr-2">
+                            <button
+                              type="button"
+                              onClick={() => onSelectSymbol(ord.symbolId)}
+                              className="font-semibold tb-text-primary hover:text-[var(--accent-primary)] cursor-pointer"
+                            >
+                              {ord.ticker}
+                            </button>
+                          </td>
+                          <td className="py-1.5 px-2">
+                            <span
+                              className={`rounded px-1.5 py-0.2 text-[10px] font-semibold ${
+                                ord.side === "buy" ? "tb-up-bg" : "tb-down-bg"
+                              }`}
+                            >
+                              {ord.side === "buy" ? "买入" : "卖出"} · 限价
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-right font-medium tb-text-primary">
+                            {ord.limitPrice !== undefined
+                              ? ord.limitPrice.toFixed(ord.pricePrecision)
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 px-2 text-right tb-text-primary">
+                            {fmtQty(ord.quantity)}
+                          </td>
+                          <td className="py-1.5 px-2 text-right tb-text-secondary">
+                            {ord.side === "buy" && buyFrozen > 0
+                              ? `现金 ${fmtMoney(buyFrozen)}`
+                              : `持仓 ${fmtQty(ord.quantity)}`}
+                          </td>
+                          <td className="py-1.5 px-2 text-[10px] tb-text-muted">
+                            {fmtLocalTime(ord.createdAt)}
+                          </td>
+                          <td className="py-1.5 pl-2 text-right">
+                            <button
+                              type="button"
+                              onClick={() => handleCancelOrder(ord.id)}
+                              className="tb-border-subtle tb-hover inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] tb-text-secondary hover:text-[var(--market-down)] cursor-pointer"
+                            >
+                              <IconClose size={10} />
+                              <span>撤单</span>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
-              )
-            )}
+              ))}
 
-            {subTab === "fills" && (
-              account.fills.length === 0 ? (
+            {/* 3. Fills History (with Fee column + Quick CSV Export) */}
+            {subTab === "fills" &&
+              (account.fills.length === 0 ? (
                 <div className="flex h-full min-h-[110px] flex-col items-center justify-center gap-1 text-center tb-text-muted">
                   <div>暂无虚拟成交记录</div>
                 </div>
               ) : (
-                <table className="w-full min-w-[580px] border-collapse text-left tabular-nums">
-                  <thead className="tb-border border-b text-[10px] tb-text-muted">
-                    <tr>
-                      <th className="py-1 pr-2 font-medium">成交时间</th>
-                      <th className="py-1 px-2 font-medium">品种</th>
-                      <th className="py-1 px-2 font-medium">方向 / 类型</th>
-                      <th className="py-1 px-2 text-right font-medium">成交价</th>
-                      <th className="py-1 px-2 text-right font-medium">数量</th>
-                      <th className="py-1 px-2 text-right font-medium">成交额</th>
-                      <th className="py-1 px-2 font-medium">撮合来源</th>
-                      <th className="py-1 pl-2 text-right font-medium">实现盈亏</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[var(--border-hairline)]">
-                    {account.fills.map((f) => (
-                      <tr key={f.id} className="tb-hover">
-                        <td className="py-1.5 pr-2 text-[10px] tb-text-muted whitespace-nowrap">
-                          <div>{fmtLocalTime(f.filledAt)}</div>
-                          {f.matchMode === "replay" && f.barTimeLabel && (
-                            <div className="text-[9px] text-[var(--status-delayed)]">
-                              K线 {f.barTimeLabel}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-1.5 px-2">
-                          <button
-                            type="button"
-                            onClick={() => onSelectSymbol(f.symbolId)}
-                            className="font-semibold tb-text-primary hover:text-[var(--accent-primary)] cursor-pointer"
-                          >
-                            {f.ticker}
-                          </button>
-                        </td>
-                        <td className="py-1.5 px-2 whitespace-nowrap">
-                          <span
-                            className={`rounded px-1.5 py-0.2 text-[10px] font-semibold ${
-                              f.side === "buy" ? "tb-up-bg" : "tb-down-bg"
-                            }`}
-                          >
-                            {f.side === "buy" ? "买入" : "卖出"} ·{" "}
-                            {f.type === "market" ? "市价" : "限价"}
-                          </span>
-                        </td>
-                        <td className="py-1.5 px-2 text-right font-medium tb-text-primary">
-                          {f.price.toFixed(f.pricePrecision)}
-                        </td>
-                        <td className="py-1.5 px-2 text-right tb-text-primary">
-                          {fmtQty(f.quantity)}
-                        </td>
-                        <td className="py-1.5 px-2 text-right tb-text-secondary">
-                          {fmtMoney(f.notional)}
-                        </td>
-                        <td className="py-1.5 px-2 text-[10px] whitespace-nowrap">
-                          <span
-                            className="rounded px-1.5 py-0.2"
-                            style={
-                              f.matchMode === "replay"
-                                ? {
-                                    backgroundColor: "rgba(245, 158, 11, 0.16)",
-                                    color: "var(--status-delayed)",
-                                  }
-                                : {
-                                    backgroundColor: "var(--bg-elevated)",
-                                    color: "var(--text-secondary)",
-                                  }
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[10px] tb-text-muted tabular-nums">
+                    <span>
+                      共 {account.fills.length} 笔成交 · 累计手续费{" "}
+                      <strong className="tb-text-primary font-medium">
+                        {fmtMoney(account.totalFees)}
+                      </strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleExportFills}
+                      className="tb-border-subtle tb-hover rounded border px-2 py-0.5 text-[10px] tb-text-secondary hover:text-[var(--text-primary)] cursor-pointer"
+                    >
+                      导出成交 CSV
+                    </button>
+                  </div>
+                  <table className="w-full min-w-[640px] border-collapse text-left tabular-nums">
+                    <thead className="tb-border border-b text-[10px] tb-text-muted">
+                      <tr>
+                        <th className="py-1 pr-2 font-medium">成交时间</th>
+                        <th className="py-1 px-2 font-medium">品种</th>
+                        <th className="py-1 px-2 font-medium">方向 / 类型</th>
+                        <th className="py-1 px-2 text-right font-medium">
+                          成交价
+                        </th>
+                        <th className="py-1 px-2 text-right font-medium">
+                          数量
+                        </th>
+                        <th className="py-1 px-2 text-right font-medium">
+                          成交额
+                        </th>
+                        <th className="py-1 px-2 text-right font-medium">
+                          手续费
+                        </th>
+                        <th className="py-1 px-2 font-medium">撮合来源</th>
+                        <th className="py-1 pl-2 text-right font-medium">
+                          实现盈亏
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--border-hairline)]">
+                      {account.fills.map((f) => (
+                        <tr key={f.id} className="tb-hover">
+                          <td className="py-1.5 pr-2 text-[10px] tb-text-muted whitespace-nowrap">
+                            <div>{fmtLocalTime(f.filledAt)}</div>
+                            {f.matchMode === "replay" && f.barTimeLabel && (
+                              <div className="text-[9px] text-[var(--status-delayed)]">
+                                K线 {f.barTimeLabel}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-1.5 px-2">
+                            <button
+                              type="button"
+                              onClick={() => onSelectSymbol(f.symbolId)}
+                              className="font-semibold tb-text-primary hover:text-[var(--accent-primary)] cursor-pointer"
+                            >
+                              {f.ticker}
+                            </button>
+                          </td>
+                          <td className="py-1.5 px-2 whitespace-nowrap">
+                            <span
+                              className={`rounded px-1.5 py-0.2 text-[10px] font-semibold ${
+                                f.side === "buy" ? "tb-up-bg" : "tb-down-bg"
+                              }`}
+                            >
+                              {f.side === "buy" ? "买入" : "卖出"} ·{" "}
+                              {f.type === "market" ? "市价" : "限价"}
+                            </span>
+                          </td>
+                          <td
+                            className="py-1.5 px-2 text-right font-medium tb-text-primary"
+                            title={
+                              f.referencePrice !== undefined
+                                ? `参考价 ${f.referencePrice.toFixed(
+                                    f.pricePrecision
+                                  )} · 实际滑点 ${(f.slippagePct ?? 0).toFixed(
+                                    3
+                                  )}%`
+                                : undefined
                             }
                           >
-                            {f.matchMode === "replay" ? "回放撮合" : "当前价"}
-                          </span>
-                        </td>
-                        <td
-                          className={`py-1.5 pl-2 text-right font-medium ${
-                            f.realizedPnl === null
-                              ? "tb-text-muted"
-                              : pnlColorClass(f.realizedPnl)
-                          }`}
-                        >
-                          {f.realizedPnl === null
-                            ? "—"
-                            : fmtSignedMoney(f.realizedPnl)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )
+                            {f.price.toFixed(f.pricePrecision)}
+                          </td>
+                          <td className="py-1.5 px-2 text-right tb-text-primary">
+                            {fmtQty(f.quantity)}
+                          </td>
+                          <td className="py-1.5 px-2 text-right tb-text-secondary">
+                            {fmtMoney(f.notional)}
+                          </td>
+                          <td className="py-1.5 px-2 text-right tb-text-secondary">
+                            {fmtMoney(f.fee ?? 0)}
+                          </td>
+                          <td className="py-1.5 px-2 text-[10px] whitespace-nowrap">
+                            <span
+                              className="rounded px-1.5 py-0.2"
+                              style={
+                                f.matchMode === "replay"
+                                  ? {
+                                      backgroundColor:
+                                        "rgba(245, 158, 11, 0.16)",
+                                      color: "var(--status-delayed)",
+                                    }
+                                  : {
+                                      backgroundColor: "var(--bg-elevated)",
+                                      color: "var(--text-secondary)",
+                                    }
+                              }
+                            >
+                              {f.matchMode === "replay" ? "回放撮合" : "当前价"}
+                            </span>
+                          </td>
+                          <td
+                            className={`py-1.5 pl-2 text-right font-medium ${
+                              f.realizedPnl === null
+                                ? "tb-text-muted"
+                                : pnlColorClass(f.realizedPnl)
+                            }`}
+                          >
+                            {f.realizedPnl === null
+                              ? "—"
+                              : fmtSignedMoney(f.realizedPnl)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+
+            {/* 4. Review Statistics & CSV Export */}
+            {subTab === "stats" && (
+              <div className="space-y-2.5 pb-1">
+                {/* Export Action Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-[11px] font-semibold tb-text-primary">
+                    模拟盘复盘统计
+                    <span className="ml-1.5 text-[10px] font-normal tb-text-muted">
+                      (初始资金 {fmtMoney(reviewStats.initialCash, 0)})
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleExportFills}
+                      className="tb-border-subtle tb-hover rounded border bg-[var(--bg-canvas)] px-2.5 py-0.5 text-[10px] font-medium tb-text-primary cursor-pointer"
+                    >
+                      导出成交记录 CSV
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExportEquity}
+                      className="tb-border-subtle tb-hover rounded border bg-[var(--bg-canvas)] px-2.5 py-0.5 text-[10px] font-medium tb-text-primary cursor-pointer"
+                    >
+                      导出权益曲线 CSV
+                    </button>
+                  </div>
+                </div>
+
+                {/* KPI Metrics Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 tabular-nums">
+                  <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-1.5">
+                    <div className="text-[10px] tb-text-muted">总收益率</div>
+                    <div
+                      className={`text-[13px] font-bold ${pnlColorClass(
+                        reviewStats.totalPnl
+                      )}`}
+                    >
+                      {reviewStats.totalReturnPct >= 0 ? "+" : ""}
+                      {reviewStats.totalReturnPct.toFixed(2)}%
+                    </div>
+                    <div className="text-[10px] tb-text-muted">
+                      总盈亏 {fmtSignedMoney(reviewStats.totalPnl)}
+                    </div>
+                  </div>
+
+                  <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-1.5">
+                    <div className="text-[10px] tb-text-muted">最大回撤</div>
+                    <div
+                      className={`text-[13px] font-bold ${
+                        reviewStats.maxDrawdownPct > 1e-6
+                          ? "tb-down"
+                          : "tb-text-primary"
+                      }`}
+                    >
+                      -{reviewStats.maxDrawdownPct.toFixed(2)}%
+                    </div>
+                    <div className="text-[10px] tb-text-muted">
+                      金额 -{fmtMoney(reviewStats.maxDrawdownAmount)}
+                    </div>
+                  </div>
+
+                  <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-1.5">
+                    <div className="text-[10px] tb-text-muted">已实现盈亏</div>
+                    <div
+                      className={`text-[13px] font-bold ${pnlColorClass(
+                        reviewStats.realizedPnl
+                      )}`}
+                    >
+                      {fmtSignedMoney(reviewStats.realizedPnl)}
+                    </div>
+                    <div className="text-[10px] tb-text-muted">
+                      浮动 {fmtSignedMoney(reviewStats.unrealizedPnl)}
+                    </div>
+                  </div>
+
+                  <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-1.5">
+                    <div className="text-[10px] tb-text-muted">累计手续费</div>
+                    <div className="text-[13px] font-bold tb-text-primary">
+                      {fmtMoney(reviewStats.totalFees)}
+                    </div>
+                    <div className="text-[10px] tb-text-muted">
+                      当前费率 {settings.feeRatePct}% / 滑点{" "}
+                      {settings.slippagePct}%
+                    </div>
+                  </div>
+
+                  <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-1.5">
+                    <div className="text-[10px] tb-text-muted">交易笔数</div>
+                    <div className="text-[13px] font-bold tb-text-primary">
+                      {reviewStats.totalFills} 笔
+                    </div>
+                    <div className="text-[10px] tb-text-muted">
+                      买 {reviewStats.buyFills} · 卖 {reviewStats.sellFills}
+                    </div>
+                  </div>
+
+                  <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-1.5">
+                    <div className="text-[10px] tb-text-muted">
+                      已平仓回合数
+                    </div>
+                    <div className="text-[13px] font-bold tb-text-primary">
+                      {reviewStats.closedRoundsCount} 回合
+                    </div>
+                    <div className="text-[10px] tb-text-muted">
+                      盈 {reviewStats.winningRoundsCount} · 亏{" "}
+                      {reviewStats.losingRoundsCount}
+                      {reviewStats.breakevenRoundsCount > 0
+                        ? ` · 平 ${reviewStats.breakevenRoundsCount}`
+                        : ""}
+                    </div>
+                  </div>
+
+                  <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-1.5">
+                    <div className="text-[10px] tb-text-muted">
+                      胜率（按已平仓回合）
+                    </div>
+                    <div className="text-[13px] font-bold tb-text-primary">
+                      {reviewStats.winRatePct === null
+                        ? "—"
+                        : `${reviewStats.winRatePct.toFixed(1)}%`}
+                    </div>
+                    <div className="text-[10px] tb-text-muted">
+                      {reviewStats.closedRoundsCount > 0
+                        ? `${reviewStats.winningRoundsCount}/${reviewStats.closedRoundsCount} 盈利回合`
+                        : "清仓 1 个回合后计算"}
+                    </div>
+                  </div>
+
+                  <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-1.5">
+                    <div className="text-[10px] tb-text-muted">
+                      盈亏比（均盈/均亏）
+                    </div>
+                    <div className="text-[13px] font-bold tb-text-primary">
+                      {plRatioDisplay}
+                    </div>
+                    <div className="text-[10px] tb-text-muted truncate">
+                      {reviewStats.avgWin !== null ||
+                      reviewStats.avgLoss !== null
+                        ? `均盈 ${
+                            reviewStats.avgWin !== null
+                              ? fmtMoney(reviewStats.avgWin)
+                              : "—"
+                          } / 均亏 ${
+                            reviewStats.avgLoss !== null
+                              ? fmtMoney(reviewStats.avgLoss)
+                              : "—"
+                          }`
+                        : "需已完成平仓回合"}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Equity Curve SVG Chart */}
+                <PaperEquityChart
+                  series={reviewStats.equitySeries}
+                  initialCash={account.initialCash}
+                />
+
+                {/* Methodology / Calculation Definition */}
+                <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-2 text-[10px] leading-relaxed tb-text-secondary">
+                  <div className="mb-0.5 font-semibold tb-text-primary">
+                    统计口径说明
+                  </div>
+                  <ul className="list-disc space-y-0.5 pl-4">
+                    <li>
+                      <strong className="tb-text-primary">权益曲线</strong>
+                      ：以初始虚拟资金为起点，每次成交必记录 1 个采样点，持仓期间行情或回放价格变动时自动采样写入本地（最多保留 1,000 点，优先保留初始化与成交点）。
+                    </li>
+                    <li>
+                      <strong className="tb-text-primary">最大回撤</strong>
+                      ：基于权益曲线序列，计算历史权益峰值至其后谷底的最大降幅金额与百分比。
+                    </li>
+                    <li>
+                      <strong className="tb-text-primary">
+                        胜率与盈亏比（已平仓回合）
+                      </strong>
+                      ：同一品种从建仓（持仓由 0 增至正数）至完全清仓（持仓归零）计为 1 个已平仓回合，回合盈亏为期间全部卖出成交的净已实现盈亏之和（已扣双边手续费）。胜率 = 盈利回合数 ÷ 已平仓回合数；盈亏比 = 平均盈利回合净收益 ÷ 平均亏损回合净亏损绝对值。
+                    </li>
+                    <li>
+                      <strong className="tb-text-primary">CSV 导出</strong>
+                      ：均采用 UTF-8 带 BOM 编码，可直接用 Excel 或 WPS 正常打开中文表头。
+                    </li>
+                  </ul>
+                </div>
+              </div>
             )}
 
+            {/* 5. Fee, Slippage & Chart Overlay Settings */}
+            {subTab === "settings" && (
+              <div className="space-y-2.5 pb-1">
+                <form
+                  onSubmit={handleSaveSettings}
+                  className="rounded border tb-border bg-[var(--bg-canvas)] p-2.5 space-y-2.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold tb-text-primary">
+                      手续费与滑点设置（纯本地持久化）
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1">
+                      {FEE_SLIPPAGE_PRESETS.map((p) => (
+                        <button
+                          key={p.label}
+                          type="button"
+                          onClick={() => handleApplyPreset(p)}
+                          className="tb-border tb-hover rounded border px-1.5 py-0.5 text-[10px] tb-text-secondary hover:text-[var(--text-primary)] cursor-pointer"
+                        >
+                          {p.label.split(" ")[0]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] tb-text-muted">
+                        手续费率（按成交额 %）
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="5"
+                        step="0.001"
+                        value={feeRateInput}
+                        onChange={(e) => setFeeRateInput(e.target.value)}
+                        className="tb-border-subtle h-7 rounded border bg-[var(--bg-input)] px-2 text-[11px] tabular-nums tb-text-primary outline-none focus:border-[var(--border-focus)]"
+                      />
+                      <span className="text-[9.5px] tb-text-muted">
+                        默认 0.1%（即千分之一）
+                      </span>
+                    </label>
+
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] tb-text-muted">
+                        最低每笔手续费（虚拟计价货币）
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="10000"
+                        step="0.1"
+                        value={minFeeInput}
+                        onChange={(e) => setMinFeeInput(e.target.value)}
+                        className="tb-border-subtle h-7 rounded border bg-[var(--bg-input)] px-2 text-[11px] tabular-nums tb-text-primary outline-none focus:border-[var(--border-focus)]"
+                      />
+                      <span className="text-[9.5px] tb-text-muted">
+                        默认 0（单笔费用取 max(成交额×费率, 最低费)）
+                      </span>
+                    </label>
+
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] tb-text-muted">
+                        滑点比例（按参考价 %）
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="5"
+                        step="0.005"
+                        value={slippageInput}
+                        onChange={(e) => setSlippageInput(e.target.value)}
+                        className="tb-border-subtle h-7 rounded border bg-[var(--bg-input)] px-2 text-[11px] tabular-nums tb-text-primary outline-none focus:border-[var(--border-focus)]"
+                      />
+                      <span className="text-[9.5px] tb-text-muted">
+                        默认 0.05%（限价单成交价不会劣于限价）
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t tb-border">
+                    <label className="flex items-center gap-2 text-[11px] tb-text-primary cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={settings.showChartMarkers}
+                        onChange={toggleChartMarkers}
+                        className="accent-[var(--accent-primary)] cursor-pointer"
+                      />
+                      <span>
+                        在主图显示模拟盘标记（持仓成本线、未成交限价挂单线、买卖点）
+                      </span>
+                    </label>
+
+                    <button
+                      type="submit"
+                      className="rounded bg-[var(--accent-primary)] px-3 py-1 text-[11px] font-semibold text-white hover:bg-[var(--accent-hover)] transition-colors cursor-pointer"
+                    >
+                      保存费率与滑点
+                    </button>
+                  </div>
+
+                  {settingsFeedback && (
+                    <div
+                      className={`text-[10px] ${
+                        settingsFeedback.kind === "error"
+                          ? "tb-down"
+                          : "text-[var(--accent-primary)]"
+                      }`}
+                    >
+                      {settingsFeedback.text}
+                    </div>
+                  )}
+                </form>
+
+                <div className="rounded border tb-border bg-[var(--bg-canvas)] px-2.5 py-2 text-[10px] leading-relaxed tb-text-secondary">
+                  <strong className="tb-text-primary">执行说明：</strong>
+                  市价买入成交价 = 参考价 × (1 + 滑点%)，市价卖出成交价 = 参考价 × (1 - 滑点%)；限价买单成交价不超过委托限价、限价卖单成交价不低于委托限价。手续费从现金扣除，买入手续费计入持仓成本价，卖出已实现盈亏已扣除双边手续费；现金不足（含手续费）时自动拒单。设置保存在本地浏览器，仅对后续成交生效，旧账户数据自动保留不清空。
+                </div>
+              </div>
+            )}
+
+            {/* 6. Simulation Rules */}
             {subTab === "rules" && (
               <div className="space-y-1.5 rounded border tb-border bg-[var(--bg-canvas)] p-2.5 text-[11px] leading-relaxed tb-text-secondary">
                 <div className="font-semibold tb-text-primary">
@@ -1136,31 +1745,31 @@ export function PaperTradingPanel({
                 <ul className="list-disc space-y-1 pl-4">
                   <li>
                     <strong className="tb-text-primary">纯本地存储</strong>
-                    ：账户现金、持仓、挂单与成交记录仅保存在当前浏览器{" "}
+                    ：账户现金、持仓、挂单、成交、费率设置与权益曲线仅保存在当前浏览器{" "}
                     <code className="tb-text-primary">localStorage</code>
                     ，不上传任何服务器，刷新页面后自动恢复。
                   </li>
                   <li>
-                    <strong className="tb-text-primary">严格 1 倍现货与禁止卖空</strong>
-                    ：买入受可用虚拟现金全额约束（限价买单冻结对应资金），卖出仅可卖出当前已有可用持仓（限价卖单冻结对应数量），校验层写死 1 倍现货，拒绝一切超额或卖空委托。
+                    <strong className="tb-text-primary">
+                      严格 1 倍现货与禁止卖空
+                    </strong>
+                    ：买入受可用虚拟现金（含手续费）全额约束，限价买单冻结对应金额与预估手续费；卖出仅可卖出当前已有可用持仓，校验层写死 1 倍现货，拒绝一切超额或卖空委托。
                   </li>
                   <li>
-                    <strong className="tb-text-primary">非回放撮合</strong>
-                    ：市价单按活动图当前品种最新可见行情价即时成交；限价单若当前价已满足限价条件则即时成交，否则保留为挂单，随后续行情价格触及或新 K 线高低价触及后自动成交。
+                    <strong className="tb-text-primary">
+                      手续费与滑点规则
+                    </strong>
+                    ：市价单按参考价 × (1 ± 滑点%) 成交；限价单成交价受滑点影响但绝不劣于委托限价。手续费 = max(成交额 × 费率%, 最低每笔费用)，从虚拟现金扣除并计入成交记录与已实现盈亏。
                   </li>
                   <li>
-                    <strong className="tb-text-primary">K 线回放撮合</strong>
-                    ：回放中严格只使用当前回放 K 线，绝不提前读取未来数据。市价单按当前回放根收盘价成交；限价单在后续步进/播放的新 K 线中，若买单满足{" "}
-                    <code className="tb-text-primary">low ≤ 委托价</code>（按{" "}
-                    <code className="tb-text-primary">min(open, 委托价)</code>{" "}
-                    成交）或卖单满足{" "}
-                    <code className="tb-text-primary">high ≥ 委托价</code>（按{" "}
-                    <code className="tb-text-primary">max(open, 委托价)</code>{" "}
-                    成交）时自动成交。
+                    <strong className="tb-text-primary">
+                      主图叠加与回放撮合
+                    </strong>
+                    ：主图仅绘制当前品种的持仓成本线、未成交限价挂单线与买卖点标记（可在面板或图上随时开关）；回放模式下严格只使用当前回放 K 线撮合，且主图只显示不晚于回放进度的历史成交点，不泄露未来数据。
                   </li>
                   <li>
                     <strong className="tb-text-primary">跨品种记账</strong>
-                    ：切换品种或多图活动窗格不会丢失账户数据；多市场品种按虚拟计价单位面值 1:1 统一统计，不计手续费、滑点与汇率折算。
+                    ：切换品种或多图活动窗格不会丢失账户数据；多市场品种按虚拟计价单位面值 1:1 统一统计，不计汇率折算。
                   </li>
                 </ul>
               </div>
